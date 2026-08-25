@@ -1,3 +1,5 @@
+use std::borrow::Borrow;
+
 use crate::node::{Node, NodeCapacity};
 
 /// Number of entries stored by a tree.
@@ -36,6 +38,22 @@ impl<K, V, const CAPACITY: usize> Root<K, V, CAPACITY> {
 
     fn last_key_value(&self) -> Option<(&K, &V)> {
         self.node.last_key_value()
+    }
+
+    fn get<Q>(&self, key: &Q) -> Option<&V>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.node.get(key)
+    }
+
+    fn get_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.node.get_mut(key)
     }
 
     #[cfg(test)]
@@ -81,6 +99,33 @@ impl<K, V, const CAPACITY: usize> BTree<K, V, CAPACITY> {
 }
 
 impl<K: Ord, V, const CAPACITY: usize> BTree<K, V, CAPACITY> {
+    /// Returns the value associated with an owned or borrowed key.
+    pub fn get<Q>(&self, key: &Q) -> Option<&V>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.root.get(key)
+    }
+
+    /// Returns a mutable value associated with an owned or borrowed key.
+    pub fn get_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.root.get_mut(key)
+    }
+
+    /// Returns whether the tree contains an owned or borrowed key.
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.get(key).is_some()
+    }
+
     /// Returns the smallest key and its value, if present.
     pub fn first_key_value(&self) -> Option<(&K, &V)> {
         self.root.first_key_value()
@@ -99,10 +144,55 @@ impl<K, V, const CAPACITY: usize> Default for BTree<K, V, CAPACITY> {
 }
 
 #[cfg(test)]
+impl<K, V, const CAPACITY: usize> BTree<K, V, CAPACITY> {
+    fn from_test_root(node: Node<K, V, CAPACITY>) -> Self {
+        NodeCapacity::<CAPACITY>::validate();
+        let length = EntryCount(node.entry_count());
+
+        Self {
+            root: Root { node },
+            length,
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::BTree;
+    use crate::node::Node;
 
     type AccountBalances = BTree<String, u64, 3>;
+
+    fn leaf_balances() -> AccountBalances {
+        AccountBalances::from_test_root(Node::from_sorted_entries([
+            (String::from("account-2026-1001"), 12_500),
+            (String::from("account-2026-2001"), 25_000),
+            (String::from("account-2026-3001"), 37_500),
+        ]))
+    }
+
+    fn branched_balances() -> AccountBalances {
+        AccountBalances::from_test_root(Node::from_sorted_branch(
+            Node::from_sorted_entries([
+                (String::from("account-2026-1001"), 12_500),
+                (String::from("account-2026-1501"), 18_750),
+            ]),
+            (
+                String::from("account-2026-2001"),
+                Node::from_sorted_entries([
+                    (String::from("account-2026-2001"), 25_000),
+                    (String::from("account-2026-2501"), 31_250),
+                ]),
+            ),
+            [(
+                String::from("account-2026-3001"),
+                Node::from_sorted_entries([
+                    (String::from("account-2026-3001"), 37_500),
+                    (String::from("account-2026-3501"), 43_750),
+                ]),
+            )],
+        ))
+    }
 
     #[test]
     fn new_with_valid_capacity_creates_empty_tree() {
@@ -140,5 +230,100 @@ mod tests {
 
         assert_eq!(first, None);
         assert_eq!(last, None);
+    }
+
+    #[test]
+    fn get_on_empty_tree_returns_none() {
+        let balances = AccountBalances::new();
+
+        assert_eq!(balances.get("account-2026-1001"), None);
+    }
+
+    #[test]
+    fn get_existing_account_returns_balance() {
+        let balances = leaf_balances();
+
+        assert_eq!(balances.get("account-2026-2001"), Some(&25_000));
+    }
+
+    #[test]
+    fn get_missing_account_returns_none() {
+        let balances = leaf_balances();
+
+        assert_eq!(balances.get("account-2026-2501"), None);
+    }
+
+    #[test]
+    fn get_with_str_finds_owned_string_key() {
+        let balances = leaf_balances();
+        let borrowed_account_id: &str = "account-2026-3001";
+
+        assert_eq!(balances.get(borrowed_account_id), Some(&37_500));
+    }
+
+    #[test]
+    fn get_in_multilevel_tree_follows_branch_path() {
+        let balances = branched_balances();
+
+        assert_eq!(balances.get("account-2026-3501"), Some(&43_750));
+    }
+
+    #[test]
+    fn branched_tree_accessors_follow_outer_leaves() {
+        let balances = branched_balances();
+
+        assert_eq!(
+            balances.first_key_value(),
+            Some((&String::from("account-2026-1001"), &12_500))
+        );
+        assert_eq!(
+            balances.last_key_value(),
+            Some((&String::from("account-2026-3501"), &43_750))
+        );
+    }
+
+    #[test]
+    fn get_mut_updates_only_selected_account_balance() {
+        let mut balances = branched_balances();
+
+        let updated = balances.get_mut("account-2026-2501").map(|balance| {
+            *balance = 32_000;
+        });
+
+        assert_eq!(updated, Some(()));
+        assert_eq!(balances.get("account-2026-2501"), Some(&32_000));
+        assert_eq!(balances.get("account-2026-2001"), Some(&25_000));
+        assert_eq!(balances.get("account-2026-3001"), Some(&37_500));
+    }
+
+    #[test]
+    fn get_mut_missing_account_preserves_tree() {
+        let mut balances = leaf_balances();
+
+        let missing = balances.get_mut("account-2026-2501");
+
+        assert_eq!(missing, None);
+        assert_eq!(
+            balances.first_key_value(),
+            Some((&String::from("account-2026-1001"), &12_500))
+        );
+        assert_eq!(
+            balances.last_key_value(),
+            Some((&String::from("account-2026-3001"), &37_500))
+        );
+    }
+
+    #[test]
+    fn contains_key_for_existing_account_returns_true() {
+        let balances = leaf_balances();
+
+        assert!(balances.contains_key("account-2026-1001"));
+    }
+
+    #[test]
+    fn contains_key_for_missing_account_returns_false() {
+        let balances = leaf_balances();
+
+        assert!(!balances.contains_key("account-2026-2501"));
     }
 }

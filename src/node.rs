@@ -14,6 +14,7 @@ impl<const CAPACITY: usize> NodeCapacity<CAPACITY> {
 }
 
 /// Closed set of node shapes.
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Node<K, V, const CAPACITY: usize> {
     Leaf(LeafNode<K, V, CAPACITY>),
     #[cfg_attr(
@@ -24,6 +25,26 @@ pub(crate) enum Node<K, V, const CAPACITY: usize> {
         )
     )]
     Branch(BranchNode<K, V, CAPACITY>),
+}
+
+/// Result of inserting into a subtree.
+#[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "leaf insertion connects to public insertion with root growth"
+    )
+)]
+pub(crate) enum InsertResult<K, V, const CAPACITY: usize> {
+    Inserted,
+    Replaced {
+        previous: V,
+    },
+    InsertedAndSplit {
+        separator: K,
+        right: Box<Node<K, V, CAPACITY>>,
+    },
 }
 
 impl<K, V, const CAPACITY: usize> Node<K, V, CAPACITY> {
@@ -159,10 +180,18 @@ impl EntryIndex {
 }
 
 /// Sorted entries owned by a leaf node.
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct LeafNode<K, V, const CAPACITY: usize> {
     entries: Vec<Entry<K, V>>,
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "leaf insertion connects to public insertion with root growth"
+    )
+)]
 impl<K, V, const CAPACITY: usize> LeafNode<K, V, CAPACITY> {
     /// Creates a leaf without allocating an entry buffer.
     fn empty() -> Self {
@@ -218,6 +247,60 @@ impl<K, V, const CAPACITY: usize> LeafNode<K, V, CAPACITY> {
         }
     }
 
+    /// Inserts an entry, reporting replacement or structural growth.
+    pub(crate) fn insert(&mut self, key: K, value: V) -> InsertResult<K, V, CAPACITY>
+    where
+        K: Ord + Clone,
+    {
+        match self.search(&key) {
+            SearchSlot::Occupied(index) => self.replace_value(index, value),
+            SearchSlot::Vacant(index) => self.insert_new(index, key, value),
+        }
+    }
+
+    fn replace_value(&mut self, index: EntryIndex, value: V) -> InsertResult<K, V, CAPACITY> {
+        let previous = std::mem::replace(self.entries[index.get()].value_mut(), value);
+        InsertResult::Replaced { previous }
+    }
+
+    fn insert_new(&mut self, index: EntryIndex, key: K, value: V) -> InsertResult<K, V, CAPACITY>
+    where
+        K: Clone,
+    {
+        self.reserve_overflow_capacity();
+        self.entries.insert(index.get(), Entry::new(key, value));
+
+        if self.entries.len() <= CAPACITY {
+            InsertResult::Inserted
+        } else {
+            self.split()
+        }
+    }
+
+    fn reserve_overflow_capacity(&mut self) {
+        let overflow_capacity = CAPACITY.saturating_add(1);
+        let additional = overflow_capacity.saturating_sub(self.entries.len());
+        self.entries.reserve_exact(additional);
+    }
+
+    fn split(&mut self) -> InsertResult<K, V, CAPACITY>
+    where
+        K: Clone,
+    {
+        let split_index = CAPACITY.saturating_add(1) / 2;
+        let separator = self.entries[split_index].key().clone();
+        let mut right_entries = self.entries.split_off(split_index);
+        let additional = CAPACITY
+            .saturating_add(1)
+            .saturating_sub(right_entries.len());
+        right_entries.reserve_exact(additional);
+        let right = Box::new(Node::Leaf(Self {
+            entries: right_entries,
+        }));
+
+        InsertResult::InsertedAndSplit { separator, right }
+    }
+
     #[cfg(test)]
     pub(crate) fn from_sorted_entries(entries: impl IntoIterator<Item = (K, V)>) -> Self {
         Self {
@@ -245,6 +328,7 @@ impl<K, V, const CAPACITY: usize> LeafNode<K, V, CAPACITY> {
 }
 
 /// Branch with at least two children.
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct BranchNode<K, V, const CAPACITY: usize> {
     leftmost: Box<Node<K, V, CAPACITY>>,
     first_right: BranchEdge<K, V, CAPACITY>,
@@ -352,6 +436,7 @@ impl<K, V, const CAPACITY: usize> BranchNode<K, V, CAPACITY> {
 }
 
 /// Separator paired with the child whose minimum it duplicates.
+#[derive(Debug, PartialEq, Eq)]
 struct BranchEdge<K, V, const CAPACITY: usize> {
     lower_bound: K,
     child: Box<Node<K, V, CAPACITY>>,
@@ -389,13 +474,20 @@ impl EdgeIndex {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 struct Entry<K, V> {
     key: K,
     value: V,
 }
 
 impl<K, V> Entry<K, V> {
-    #[cfg(test)]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "entry construction connects to public insertion with root growth"
+        )
+    )]
     fn new(key: K, value: V) -> Self {
         Self { key, value }
     }
@@ -419,7 +511,7 @@ impl<K, V> Entry<K, V> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BranchNode, LeafNode, Node, SearchSlot};
+    use super::{BranchNode, InsertResult, LeafNode, Node, SearchSlot};
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
     struct AccountId(u64);
@@ -462,6 +554,21 @@ mod tests {
                 Node::from_leaf(account_leaf([3_001, 3_501])),
             )],
         )
+    }
+
+    fn account_ids<const CAPACITY: usize>(
+        leaf: &LeafNode<AccountId, BalanceCents, CAPACITY>,
+    ) -> Vec<AccountId> {
+        leaf.entries.iter().map(|entry| entry.key).collect()
+    }
+
+    fn account_entries<const CAPACITY: usize>(
+        leaf: &LeafNode<AccountId, BalanceCents, CAPACITY>,
+    ) -> Vec<(AccountId, BalanceCents)> {
+        leaf.entries
+            .iter()
+            .map(|entry| (entry.key, entry.value))
+            .collect()
     }
 
     #[test]
@@ -596,5 +703,216 @@ mod tests {
 
         assert!(!node.is_empty_leaf());
         assert!(node.allocated_entry_capacity() > 0);
+    }
+
+    #[test]
+    fn insert_into_empty_leaf_adds_account_balance() {
+        let mut leaf = account_leaf::<3>([]);
+
+        let result = leaf.insert(AccountId::new(1_001), BalanceCents::new(12_500));
+
+        assert_eq!(result, InsertResult::Inserted);
+        assert_eq!(account_ids(&leaf), [AccountId::new(1_001)]);
+        assert_eq!(
+            leaf.get(&AccountId::new(1_001)),
+            Some(&BalanceCents::new(12_500))
+        );
+    }
+
+    #[test]
+    fn insert_new_account_into_non_full_leaf_preserves_order() {
+        let mut leaf = account_leaf::<5>([2_001, 4_001]);
+
+        let before = leaf.insert(AccountId::new(1_001), BalanceCents::new(12_500));
+        let between = leaf.insert(AccountId::new(3_001), BalanceCents::new(37_500));
+        let after = leaf.insert(AccountId::new(5_001), BalanceCents::new(62_500));
+
+        assert_eq!(before, InsertResult::Inserted);
+        assert_eq!(between, InsertResult::Inserted);
+        assert_eq!(after, InsertResult::Inserted);
+        assert_eq!(
+            account_ids(&leaf),
+            [
+                AccountId::new(1_001),
+                AccountId::new(2_001),
+                AccountId::new(3_001),
+                AccountId::new(4_001),
+                AccountId::new(5_001),
+            ]
+        );
+    }
+
+    #[test]
+    fn insert_existing_account_replaces_balance() {
+        let mut leaf = account_leaf::<3>([1_001]);
+        let capacity_before = leaf.allocated_entry_capacity();
+
+        let result = leaf.insert(AccountId::new(1_001), BalanceCents::new(15_000));
+
+        assert_eq!(
+            result,
+            InsertResult::Replaced {
+                previous: BalanceCents::new(10_010),
+            }
+        );
+        assert_eq!(leaf.entry_count(), 1);
+        assert_eq!(leaf.allocated_entry_capacity(), capacity_before);
+        assert_eq!(
+            leaf.get(&AccountId::new(1_001)),
+            Some(&BalanceCents::new(15_000))
+        );
+    }
+
+    #[test]
+    fn insert_into_full_leaf_splits_at_valid_occupancy() {
+        let mut leaf = account_leaf::<3>([1_001, 2_001, 3_001]);
+
+        let result = leaf.insert(AccountId::new(2_501), BalanceCents::new(31_250));
+
+        assert_eq!(
+            result,
+            InsertResult::InsertedAndSplit {
+                separator: AccountId::new(2_501),
+                right: Box::new(Node::from_sorted_entries([
+                    (AccountId::new(2_501), BalanceCents::new(31_250)),
+                    (AccountId::new(3_001), BalanceCents::new(30_010)),
+                ])),
+            }
+        );
+        assert_eq!(
+            account_ids(&leaf),
+            [AccountId::new(1_001), AccountId::new(2_001)]
+        );
+    }
+
+    #[test]
+    fn split_leaf_with_odd_capacity_balances_entries() {
+        let mut leaf = account_leaf::<3>([1_001, 2_001, 3_001]);
+
+        let result = leaf.insert(AccountId::new(4_001), BalanceCents::new(50_000));
+
+        assert_eq!(
+            result,
+            InsertResult::InsertedAndSplit {
+                separator: AccountId::new(3_001),
+                right: Box::new(Node::from_sorted_entries([
+                    (AccountId::new(3_001), BalanceCents::new(30_010)),
+                    (AccountId::new(4_001), BalanceCents::new(50_000)),
+                ])),
+            }
+        );
+        assert_eq!(leaf.entry_count(), 2);
+    }
+
+    #[test]
+    fn split_leaf_with_even_capacity_balances_entries() {
+        let mut leaf = account_leaf::<4>([1_001, 2_001, 3_001, 4_001]);
+
+        let result = leaf.insert(AccountId::new(2_501), BalanceCents::new(31_250));
+
+        assert_eq!(
+            result,
+            InsertResult::InsertedAndSplit {
+                separator: AccountId::new(2_501),
+                right: Box::new(Node::from_sorted_entries([
+                    (AccountId::new(2_501), BalanceCents::new(31_250)),
+                    (AccountId::new(3_001), BalanceCents::new(30_010)),
+                    (AccountId::new(4_001), BalanceCents::new(40_010)),
+                ])),
+            }
+        );
+        assert_eq!(leaf.entry_count(), 2);
+    }
+
+    #[test]
+    fn split_leaf_promotes_right_minimum() {
+        let mut leaf = account_leaf::<3>([1_001, 2_001, 3_001]);
+
+        let result = leaf.insert(AccountId::new(3_501), BalanceCents::new(43_750));
+
+        assert_eq!(
+            result,
+            InsertResult::InsertedAndSplit {
+                separator: AccountId::new(3_001),
+                right: Box::new(Node::from_sorted_entries([
+                    (AccountId::new(3_001), BalanceCents::new(30_010)),
+                    (AccountId::new(3_501), BalanceCents::new(43_750)),
+                ])),
+            }
+        );
+    }
+
+    #[test]
+    fn split_leaf_preserves_every_account_exactly_once() {
+        let mut leaf = account_leaf::<4>([1_001, 2_001, 3_001, 4_001]);
+
+        let result = leaf.insert(AccountId::new(2_501), BalanceCents::new(31_250));
+
+        let InsertResult::InsertedAndSplit { right, .. } = result else {
+            panic!("full leaf insertion must split");
+        };
+        let Node::Leaf(right_leaf) = *right else {
+            panic!("leaf insertion must produce a leaf sibling");
+        };
+        let all_entries = account_entries(&leaf)
+            .into_iter()
+            .chain(account_entries(&right_leaf))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            all_entries,
+            [
+                (AccountId::new(1_001), BalanceCents::new(10_010)),
+                (AccountId::new(2_001), BalanceCents::new(20_010)),
+                (AccountId::new(2_501), BalanceCents::new(31_250)),
+                (AccountId::new(3_001), BalanceCents::new(30_010)),
+                (AccountId::new(4_001), BalanceCents::new(40_010)),
+            ]
+        );
+    }
+
+    #[test]
+    fn split_leaf_reserves_one_overflow_slot_in_right_sibling() {
+        let mut leaf = account_leaf::<3>([1_001, 2_001, 3_001]);
+
+        let result = leaf.insert(AccountId::new(4_001), BalanceCents::new(50_000));
+
+        let InsertResult::InsertedAndSplit { right, .. } = result else {
+            panic!("full leaf insertion must split");
+        };
+        let Node::Leaf(right_leaf) = *right else {
+            panic!("leaf insertion must produce a leaf sibling");
+        };
+        assert!(leaf.allocated_entry_capacity() >= 4);
+        assert!(right_leaf.allocated_entry_capacity() >= 4);
+    }
+
+    #[test]
+    fn first_leaf_insertion_reserves_one_overflow_slot() {
+        let mut leaf = account_leaf::<3>([]);
+
+        let result = leaf.insert(AccountId::new(1_001), BalanceCents::new(12_500));
+
+        assert_eq!(result, InsertResult::Inserted);
+        assert!(leaf.allocated_entry_capacity() >= 4);
+    }
+
+    #[test]
+    fn stable_leaf_insertions_and_replacement_reuse_allocation() {
+        let mut leaf = account_leaf::<3>([]);
+        let first = leaf.insert(AccountId::new(1_001), BalanceCents::new(12_500));
+        let reserved_capacity = leaf.allocated_entry_capacity();
+
+        let second = leaf.insert(AccountId::new(2_001), BalanceCents::new(25_000));
+        let replacement = leaf.insert(AccountId::new(1_001), BalanceCents::new(15_000));
+
+        assert_eq!(first, InsertResult::Inserted);
+        assert_eq!(second, InsertResult::Inserted);
+        assert_eq!(
+            replacement,
+            InsertResult::Replaced {
+                previous: BalanceCents::new(12_500),
+            }
+        );
+        assert_eq!(leaf.allocated_entry_capacity(), reserved_capacity);
     }
 }

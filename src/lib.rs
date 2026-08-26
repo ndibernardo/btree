@@ -25,8 +25,12 @@
 //! let _invalid = BTree::<u64, u64, 2>::new();
 //! ```
 
+mod iter;
 mod node;
 mod tree;
 
+pub use iter::Iter;
+pub use iter::Range;
+pub use iter::RangeError;
 pub use tree::BTree;
 pub use tree::InsertOutcome;

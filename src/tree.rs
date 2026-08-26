@@ -1,5 +1,9 @@
 use std::borrow::Borrow;
+use std::ops::RangeBounds;
 
+use crate::iter::Iter;
+use crate::iter::Range;
+use crate::iter::RangeError;
 use crate::node::InsertResult;
 use crate::node::Node;
 use crate::node::NodeCapacity;
@@ -169,6 +173,26 @@ impl<K: Ord, V, const CAPACITY: usize> BTree<K, V, CAPACITY> {
     /// Returns the greatest key and its value, if present.
     pub fn last_key_value(&self) -> Option<(&K, &V)> {
         self.root.last_key_value()
+    }
+
+    /// Returns an immutable iterator over all entries in key order.
+    pub fn iter(&self) -> Iter<'_, K, V, CAPACITY> {
+        Iter::new(&self.root.node, self.length.get())
+    }
+
+    /// Returns an immutable iterator over entries within the given bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RangeError::StartAfterEnd`] when the start sorts after the end.
+    /// Returns [`RangeError::EmptyExcludedBounds`] when equal bounds are not both included.
+    pub fn range<Q, R>(&self, bounds: R) -> Result<Range<'_, K, V, CAPACITY>, RangeError>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+        R: RangeBounds<Q>,
+    {
+        Range::new(&self.root.node, &bounds)
     }
 }
 

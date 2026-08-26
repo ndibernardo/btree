@@ -184,7 +184,7 @@ impl EntryIndex {
         Self(index)
     }
 
-    const fn get(self) -> usize {
+    pub(crate) const fn get(self) -> usize {
         self.0
     }
 }
@@ -211,6 +211,16 @@ impl<K, V, const CAPACITY: usize> LeafNode<K, V, CAPACITY> {
     /// Returns the last entry, if present.
     fn last_key_value(&self) -> Option<(&K, &V)> {
         self.entries.last().map(Entry::as_pair)
+    }
+
+    /// Returns the entry at a cursor position.
+    pub(crate) fn entry_at(&self, index: usize) -> Option<(&K, &V)> {
+        self.entries.get(index).map(Entry::as_pair)
+    }
+
+    /// Returns the number of entries available to a cursor.
+    pub(crate) const fn entry_count(&self) -> usize {
+        self.entries.len()
     }
 
     /// Locates an occupied entry or its insertion position.
@@ -323,11 +333,6 @@ impl<K, V, const CAPACITY: usize> LeafNode<K, V, CAPACITY> {
     fn allocated_entry_capacity(&self) -> usize {
         self.entries.capacity()
     }
-
-    #[cfg(test)]
-    fn entry_count(&self) -> usize {
-        self.entries.len()
-    }
 }
 
 /// Branch with at least two children.
@@ -369,6 +374,11 @@ impl<K, V, const CAPACITY: usize> BranchNode<K, V, CAPACITY> {
         self.remaining.len().saturating_add(1)
     }
 
+    /// Returns the number of child subtrees available to a cursor.
+    pub(crate) fn child_count(&self) -> usize {
+        self.edge_count().saturating_add(1)
+    }
+
     fn child_position<Q>(&self, key: &Q) -> ChildPosition
     where
         K: Borrow<Q>,
@@ -386,6 +396,31 @@ impl<K, V, const CAPACITY: usize> BranchNode<K, V, CAPACITY> {
                     count => ChildPosition::Remaining(EdgeIndex::new(count - 1)),
                 }
             }
+        }
+    }
+
+    /// Returns the child index selected for a key.
+    pub(crate) fn child_index_for_key<Q>(&self, key: &Q) -> usize
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        match self.child_position(key) {
+            ChildPosition::Leftmost => 0,
+            ChildPosition::FirstRight => 1,
+            ChildPosition::Remaining(index) => index.get().saturating_add(2),
+        }
+    }
+
+    /// Returns the child at an ordered cursor position.
+    pub(crate) fn child_at(&self, index: usize) -> Option<&Node<K, V, CAPACITY>> {
+        match index {
+            0 => Some(self.leftmost.as_ref()),
+            1 => Some(self.first_right.child.as_ref()),
+            remaining => self
+                .remaining
+                .get(remaining.saturating_sub(2))
+                .map(|edge| edge.child.as_ref()),
         }
     }
 

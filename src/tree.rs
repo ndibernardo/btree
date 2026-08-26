@@ -1,6 +1,19 @@
 use std::borrow::Borrow;
 
-use crate::node::{Node, NodeCapacity};
+use crate::node::{InsertResult, Node, NodeCapacity};
+
+/// Public result of inserting a key-value pair.
+#[derive(Debug, PartialEq, Eq)]
+#[must_use = "insertion reports whether an existing value was replaced"]
+pub enum InsertOutcome<V> {
+    /// A new key was inserted.
+    Inserted,
+    /// An existing key's value was replaced.
+    Replaced {
+        /// Value previously associated with the key.
+        previous: V,
+    },
+}
 
 /// Number of entries stored by a tree.
 #[derive(Clone, Copy)]
@@ -17,6 +30,10 @@ impl EntryCount {
 
     const fn is_empty(self) -> bool {
         self.0 == 0
+    }
+
+    fn increment(&mut self) {
+        self.0 += 1;
     }
 }
 
@@ -56,6 +73,11 @@ impl<K, V, const CAPACITY: usize> Root<K, V, CAPACITY> {
         self.node.get_mut(key)
     }
 
+    fn grow(&mut self, separator: K, right: Box<Node<K, V, CAPACITY>>) {
+        let left = std::mem::replace(&mut self.node, Node::empty_leaf());
+        self.node = Node::from_root_split(left, separator, right);
+    }
+
     #[cfg(test)]
     fn is_empty_leaf(&self) -> bool {
         self.node.is_empty_leaf()
@@ -64,6 +86,17 @@ impl<K, V, const CAPACITY: usize> Root<K, V, CAPACITY> {
     #[cfg(test)]
     fn allocated_entry_capacity(&self) -> usize {
         self.node.allocated_entry_capacity()
+    }
+
+    #[cfg(test)]
+    fn height(&self) -> usize {
+        self.node.height()
+    }
+}
+
+impl<K: Ord + Clone, V, const CAPACITY: usize> Root<K, V, CAPACITY> {
+    fn insert(&mut self, key: K, value: V) -> InsertResult<K, V, CAPACITY> {
+        self.node.insert(key, value)
     }
 }
 
@@ -137,6 +170,24 @@ impl<K: Ord, V, const CAPACITY: usize> BTree<K, V, CAPACITY> {
     }
 }
 
+impl<K: Ord + Clone, V, const CAPACITY: usize> BTree<K, V, CAPACITY> {
+    /// Inserts a key-value pair, returning whether a value was replaced.
+    pub fn insert(&mut self, key: K, value: V) -> InsertOutcome<V> {
+        match self.root.insert(key, value) {
+            InsertResult::Inserted => {
+                self.length.increment();
+                InsertOutcome::Inserted
+            }
+            InsertResult::Replaced { previous } => InsertOutcome::Replaced { previous },
+            InsertResult::InsertedAndSplit { separator, right } => {
+                self.length.increment();
+                self.root.grow(separator, right);
+                InsertOutcome::Inserted
+            }
+        }
+    }
+}
+
 impl<K, V, const CAPACITY: usize> Default for BTree<K, V, CAPACITY> {
     fn default() -> Self {
         Self::new()
@@ -154,11 +205,19 @@ impl<K, V, const CAPACITY: usize> BTree<K, V, CAPACITY> {
             length,
         }
     }
+
+    fn assert_valid(&self)
+    where
+        K: Ord,
+    {
+        let counted_entries = self.root.node.assert_valid_root();
+        assert_eq!(counted_entries, self.length.get());
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::BTree;
+    use super::{BTree, InsertOutcome};
     use crate::node::Node;
 
     type AccountBalances = BTree<String, u64, 3>;
@@ -192,6 +251,27 @@ mod tests {
                 ]),
             )],
         ))
+    }
+
+    fn insert_accounts_and_validate(account_ids: impl IntoIterator<Item = u64>) {
+        let mut balances = AccountBalances::new();
+        let mut inserted_accounts = Vec::new();
+
+        account_ids.into_iter().for_each(|account_id| {
+            let key = format!("account-2026-{account_id}");
+            let value = account_id * 10;
+            let outcome = balances.insert(key.clone(), value);
+            inserted_accounts.push((key, value));
+
+            assert_eq!(outcome, InsertOutcome::Inserted);
+            balances.assert_valid();
+            assert_eq!(balances.len(), inserted_accounts.len());
+            inserted_accounts
+                .iter()
+                .for_each(|(inserted_key, balance)| {
+                    assert_eq!(balances.get(inserted_key), Some(balance));
+                });
+        });
     }
 
     #[test]
@@ -325,5 +405,114 @@ mod tests {
         let balances = leaf_balances();
 
         assert!(!balances.contains_key("account-2026-2501"));
+    }
+
+    #[test]
+    fn insert_into_empty_tree_returns_inserted() {
+        let mut balances = AccountBalances::new();
+
+        let outcome = balances.insert(String::from("account-2026-1001"), 12_500);
+
+        assert_eq!(outcome, InsertOutcome::Inserted);
+        assert_eq!(balances.len(), 1);
+        assert_eq!(balances.get("account-2026-1001"), Some(&12_500));
+    }
+
+    #[test]
+    fn insert_existing_account_returns_previous_balance_and_preserves_length() {
+        let mut balances = AccountBalances::new();
+        let inserted = balances.insert(String::from("account-2026-1001"), 12_500);
+
+        let replaced = balances.insert(String::from("account-2026-1001"), 15_000);
+
+        assert_eq!(inserted, InsertOutcome::Inserted);
+        assert_eq!(replaced, InsertOutcome::Replaced { previous: 12_500 });
+        assert_eq!(balances.len(), 1);
+        assert_eq!(balances.get("account-2026-1001"), Some(&15_000));
+    }
+
+    #[test]
+    fn stable_root_insertion_preserves_height() {
+        let mut balances = AccountBalances::new();
+
+        [1_001_u64, 2_001, 3_001].into_iter().for_each(|account| {
+            let outcome = balances.insert(format!("account-2026-{account}"), account * 10);
+            assert_eq!(outcome, InsertOutcome::Inserted);
+        });
+
+        assert_eq!(balances.root.height(), 0);
+        assert_eq!(balances.len(), 3);
+    }
+
+    #[test]
+    fn leaf_root_split_increases_height() {
+        let mut balances = AccountBalances::new();
+
+        [1_001_u64, 2_001, 3_001, 4_001]
+            .into_iter()
+            .for_each(|account| {
+                let outcome = balances.insert(format!("account-2026-{account}"), account * 10);
+                assert_eq!(outcome, InsertOutcome::Inserted);
+            });
+
+        assert_eq!(balances.root.height(), 1);
+        assert_eq!(balances.len(), 4);
+        assert_eq!(balances.get("account-2026-1001"), Some(&10_010));
+        assert_eq!(balances.get("account-2026-4001"), Some(&40_010));
+    }
+
+    #[test]
+    fn branch_root_split_increases_height() {
+        let mut balances = AccountBalances::new();
+
+        (1_u64..=10).for_each(|sequence| {
+            let account = 1_000 + sequence;
+            let outcome = balances.insert(format!("account-2026-{account}"), account * 10);
+            assert_eq!(outcome, InsertOutcome::Inserted);
+        });
+
+        assert_eq!(balances.root.height(), 2);
+        assert_eq!(balances.len(), 10);
+        assert_eq!(balances.get("account-2026-1001"), Some(&10_010));
+        assert_eq!(balances.get("account-2026-1010"), Some(&10_100));
+    }
+
+    #[test]
+    fn insert_new_minimum_preserves_ancestor_routing() {
+        let mut balances = AccountBalances::new();
+        (1_u64..=10).for_each(|sequence| {
+            let account = 1_000 + sequence;
+            let outcome = balances.insert(format!("account-2026-{account}"), account * 10);
+            assert_eq!(outcome, InsertOutcome::Inserted);
+        });
+
+        let outcome = balances.insert(String::from("account-2026-0501"), 5_010);
+
+        assert_eq!(outcome, InsertOutcome::Inserted);
+        assert_eq!(balances.len(), 11);
+        balances.assert_valid();
+        assert_eq!(
+            balances.first_key_value(),
+            Some((&String::from("account-2026-0501"), &5_010))
+        );
+        assert_eq!(balances.root.height(), 2);
+        assert_eq!(balances.get("account-2026-1010"), Some(&10_100));
+    }
+
+    #[test]
+    fn ascending_insertions_preserve_tree_invariants() {
+        insert_accounts_and_validate(1_001_u64..=1_064);
+    }
+
+    #[test]
+    fn descending_insertions_preserve_tree_invariants() {
+        insert_accounts_and_validate((1_001_u64..=1_064).rev());
+    }
+
+    #[test]
+    fn interleaved_insertions_preserve_tree_invariants() {
+        let account_ids = (0_u64..32).flat_map(|offset| [1_001 + offset, 1_064 - offset]);
+
+        insert_accounts_and_validate(account_ids);
     }
 }

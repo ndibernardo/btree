@@ -17,25 +17,11 @@ impl<const CAPACITY: usize> NodeCapacity<CAPACITY> {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Node<K, V, const CAPACITY: usize> {
     Leaf(LeafNode<K, V, CAPACITY>),
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "branch construction arrives with structural insertion"
-        )
-    )]
     Branch(BranchNode<K, V, CAPACITY>),
 }
 
 /// Result of inserting into a subtree.
 #[derive(Debug, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "leaf insertion connects to public insertion with root growth"
-    )
-)]
 pub(crate) enum InsertResult<K, V, const CAPACITY: usize> {
     Inserted,
     Replaced {
@@ -51,6 +37,11 @@ impl<K, V, const CAPACITY: usize> Node<K, V, CAPACITY> {
     /// Creates the canonical empty root node.
     pub(crate) fn empty_leaf() -> Self {
         Self::Leaf(LeafNode::empty())
+    }
+
+    /// Creates a branch root from a split node.
+    pub(crate) fn from_root_split(left: Self, separator: K, right: Box<Self>) -> Self {
+        Self::Branch(BranchNode::from_root_split(left, separator, right))
     }
 
     /// Returns the first leaf entry, if present.
@@ -90,6 +81,17 @@ impl<K, V, const CAPACITY: usize> Node<K, V, CAPACITY> {
         match self {
             Self::Leaf(leaf) => leaf.get_mut(key),
             Self::Branch(branch) => branch.child_for_key_mut(key).get_mut(key),
+        }
+    }
+
+    /// Inserts into a leaf or recursively into a branch.
+    pub(crate) fn insert(&mut self, key: K, value: V) -> InsertResult<K, V, CAPACITY>
+    where
+        K: Ord + Clone,
+    {
+        match self {
+            Self::Leaf(leaf) => leaf.insert(key, value),
+            Self::Branch(branch) => branch.insert(key, value),
         }
     }
 
@@ -144,6 +146,14 @@ impl<K, V, const CAPACITY: usize> Node<K, V, CAPACITY> {
             Self::Branch(branch) => branch.entry_count(),
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn height(&self) -> usize {
+        match self {
+            Self::Leaf(_leaf) => 0,
+            Self::Branch(branch) => branch.height(),
+        }
+    }
 }
 
 /// Position returned by a leaf binary search.
@@ -185,13 +195,6 @@ pub(crate) struct LeafNode<K, V, const CAPACITY: usize> {
     entries: Vec<Entry<K, V>>,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "leaf insertion connects to public insertion with root growth"
-    )
-)]
 impl<K, V, const CAPACITY: usize> LeafNode<K, V, CAPACITY> {
     /// Creates a leaf without allocating an entry buffer.
     fn empty() -> Self {
@@ -336,6 +339,18 @@ pub(crate) struct BranchNode<K, V, const CAPACITY: usize> {
 }
 
 impl<K, V, const CAPACITY: usize> BranchNode<K, V, CAPACITY> {
+    fn from_root_split(
+        leftmost: Node<K, V, CAPACITY>,
+        lower_bound: K,
+        right: Box<Node<K, V, CAPACITY>>,
+    ) -> Self {
+        Self {
+            leftmost: Box::new(leftmost),
+            first_right: BranchEdge::new(lower_bound, right),
+            remaining: Vec::with_capacity(CAPACITY),
+        }
+    }
+
     fn first_key_value(&self) -> Option<(&K, &V)> {
         self.leftmost.first_key_value()
     }
@@ -348,6 +363,10 @@ impl<K, V, const CAPACITY: usize> BranchNode<K, V, CAPACITY> {
         self.remaining
             .last()
             .map_or(self.first_right.child.as_ref(), |edge| edge.child.as_ref())
+    }
+
+    fn edge_count(&self) -> usize {
+        self.remaining.len().saturating_add(1)
     }
 
     fn child_position<Q>(&self, key: &Q) -> ChildPosition
@@ -387,7 +406,12 @@ impl<K, V, const CAPACITY: usize> BranchNode<K, V, CAPACITY> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        match self.child_position(key) {
+        let position = self.child_position(key);
+        self.child_at_position_mut(position)
+    }
+
+    fn child_at_position_mut(&mut self, position: ChildPosition) -> &mut Node<K, V, CAPACITY> {
+        match position {
             ChildPosition::Leftmost => self.leftmost.as_mut(),
             ChildPosition::FirstRight => self.first_right.child.as_mut(),
             ChildPosition::Remaining(index) => self.remaining[index.get()].child.as_mut(),
@@ -404,10 +428,10 @@ impl<K, V, const CAPACITY: usize> BranchNode<K, V, CAPACITY> {
 
         Self {
             leftmost: Box::new(leftmost),
-            first_right: BranchEdge::new(lower_bound, child),
+            first_right: BranchEdge::from_node(lower_bound, child),
             remaining: remaining
                 .into_iter()
-                .map(|(lower_bound, child)| BranchEdge::new(lower_bound, child))
+                .map(|(lower_bound, child)| BranchEdge::from_node(lower_bound, child))
                 .collect(),
         }
     }
@@ -433,6 +457,77 @@ impl<K, V, const CAPACITY: usize> BranchNode<K, V, CAPACITY> {
                 .map(|edge| edge.child.entry_count())
                 .sum::<usize>()
     }
+
+    #[cfg(test)]
+    fn height(&self) -> usize {
+        self.leftmost.height().saturating_add(1)
+    }
+}
+
+impl<K: Ord + Clone, V, const CAPACITY: usize> BranchNode<K, V, CAPACITY> {
+    fn insert(&mut self, key: K, value: V) -> InsertResult<K, V, CAPACITY> {
+        let position = self.child_position(&key);
+        let child_result = self.child_at_position_mut(position).insert(key, value);
+
+        match child_result {
+            InsertResult::Inserted => InsertResult::Inserted,
+            InsertResult::Replaced { previous } => InsertResult::Replaced { previous },
+            InsertResult::InsertedAndSplit { separator, right } => {
+                self.absorb_child_split(position, separator, right)
+            }
+        }
+    }
+
+    fn absorb_child_split(
+        &mut self,
+        position: ChildPosition,
+        separator: K,
+        right: Box<Node<K, V, CAPACITY>>,
+    ) -> InsertResult<K, V, CAPACITY> {
+        self.reserve_overflow_capacity();
+        self.insert_edge_after(position, BranchEdge::new(separator, right));
+
+        if self.edge_count() <= CAPACITY {
+            InsertResult::Inserted
+        } else {
+            self.split()
+        }
+    }
+
+    fn reserve_overflow_capacity(&mut self) {
+        let additional = CAPACITY.saturating_sub(self.remaining.len());
+        self.remaining.reserve_exact(additional);
+    }
+
+    fn insert_edge_after(&mut self, position: ChildPosition, edge: BranchEdge<K, V, CAPACITY>) {
+        match position {
+            ChildPosition::Leftmost => {
+                let previous_first = std::mem::replace(&mut self.first_right, edge);
+                self.remaining.insert(0, previous_first);
+            }
+            ChildPosition::FirstRight => self.remaining.insert(0, edge),
+            ChildPosition::Remaining(index) => self.remaining.insert(index.get() + 1, edge),
+        }
+    }
+
+    fn split(&mut self) -> InsertResult<K, V, CAPACITY> {
+        let promoted_index = CAPACITY.saturating_add(1) / 2;
+        let mut right_edges = self.remaining.split_off(promoted_index);
+        let promoted = self.remaining.remove(promoted_index - 1);
+        let right_first = right_edges.remove(0);
+        let additional = CAPACITY.saturating_sub(right_edges.len());
+        right_edges.reserve_exact(additional);
+        let right = Box::new(Node::Branch(Self {
+            leftmost: promoted.child,
+            first_right: right_first,
+            remaining: right_edges,
+        }));
+
+        InsertResult::InsertedAndSplit {
+            separator: promoted.lower_bound,
+            right,
+        }
+    }
 }
 
 /// Separator paired with the child whose minimum it duplicates.
@@ -443,12 +538,13 @@ struct BranchEdge<K, V, const CAPACITY: usize> {
 }
 
 impl<K, V, const CAPACITY: usize> BranchEdge<K, V, CAPACITY> {
+    fn new(lower_bound: K, child: Box<Node<K, V, CAPACITY>>) -> Self {
+        Self { lower_bound, child }
+    }
+
     #[cfg(test)]
-    fn new(lower_bound: K, child: Node<K, V, CAPACITY>) -> Self {
-        Self {
-            lower_bound,
-            child: Box::new(child),
-        }
+    fn from_node(lower_bound: K, child: Node<K, V, CAPACITY>) -> Self {
+        Self::new(lower_bound, Box::new(child))
     }
 }
 
@@ -474,6 +570,118 @@ impl EdgeIndex {
     }
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum ValidationPosition {
+    Root,
+    NonRoot,
+}
+
+#[cfg(test)]
+struct ValidationStats {
+    height: usize,
+    entry_count: usize,
+}
+
+#[cfg(test)]
+impl ValidationStats {
+    const fn leaf(entry_count: usize) -> Self {
+        Self {
+            height: 0,
+            entry_count,
+        }
+    }
+
+    fn merge_sibling(self, sibling: Self) -> Self {
+        assert_eq!(self.height, sibling.height);
+        Self {
+            height: self.height,
+            entry_count: self.entry_count + sibling.entry_count,
+        }
+    }
+
+    fn into_parent(self) -> Self {
+        Self {
+            height: self.height + 1,
+            entry_count: self.entry_count,
+        }
+    }
+}
+
+#[cfg(test)]
+impl<K: Ord, V, const CAPACITY: usize> Node<K, V, CAPACITY> {
+    pub(crate) fn assert_valid_root(&self) -> usize {
+        self.validate(ValidationPosition::Root).entry_count
+    }
+
+    fn validate(&self, position: ValidationPosition) -> ValidationStats {
+        match self {
+            Self::Leaf(leaf) => leaf.validate(position),
+            Self::Branch(branch) => branch.validate(position),
+        }
+    }
+
+    fn minimum_key(&self) -> &K {
+        match self {
+            Self::Leaf(leaf) => leaf.entries[0].key(),
+            Self::Branch(branch) => branch.leftmost.minimum_key(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl<K: Ord, V, const CAPACITY: usize> LeafNode<K, V, CAPACITY> {
+    fn validate(&self, position: ValidationPosition) -> ValidationStats {
+        assert!(self.entries.len() <= CAPACITY);
+        assert!(
+            self.entries
+                .windows(2)
+                .all(|entries| entries[0].key() < entries[1].key())
+        );
+
+        match position {
+            ValidationPosition::Root => assert!(self.entries.len() <= CAPACITY),
+            ValidationPosition::NonRoot => {
+                assert!(self.entries.len() >= CAPACITY.div_ceil(2));
+            }
+        }
+
+        ValidationStats::leaf(self.entries.len())
+    }
+}
+
+#[cfg(test)]
+impl<K: Ord, V, const CAPACITY: usize> BranchNode<K, V, CAPACITY> {
+    fn validate(&self, position: ValidationPosition) -> ValidationStats {
+        let edge_count = self.edge_count();
+        assert!(edge_count <= CAPACITY);
+
+        match position {
+            ValidationPosition::Root => assert!(edge_count >= 1),
+            ValidationPosition::NonRoot => {
+                let minimum_children = CAPACITY.saturating_add(1).div_ceil(2);
+                assert!(edge_count.saturating_add(1) >= minimum_children);
+            }
+        }
+
+        assert!(self.edges().map(|edge| &edge.lower_bound).is_sorted());
+        self.edges().for_each(|edge| {
+            assert!(&edge.lower_bound == edge.child.minimum_key());
+        });
+
+        self.edges()
+            .fold(
+                self.leftmost.validate(ValidationPosition::NonRoot),
+                |stats, edge| stats.merge_sibling(edge.child.validate(ValidationPosition::NonRoot)),
+            )
+            .into_parent()
+    }
+
+    fn edges(&self) -> impl Iterator<Item = &BranchEdge<K, V, CAPACITY>> {
+        std::iter::once(&self.first_right).chain(self.remaining.iter())
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct Entry<K, V> {
     key: K,
@@ -481,13 +689,6 @@ struct Entry<K, V> {
 }
 
 impl<K, V> Entry<K, V> {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "entry construction connects to public insertion with root growth"
-        )
-    )]
     fn new(key: K, value: V) -> Self {
         Self { key, value }
     }
@@ -914,5 +1115,206 @@ mod tests {
             }
         );
         assert_eq!(leaf.allocated_entry_capacity(), reserved_capacity);
+    }
+
+    #[test]
+    fn branch_absorbs_child_replacement_without_growth() {
+        let mut branch = account_branch();
+        let entry_count_before = branch.entry_count();
+
+        let result = branch.insert(AccountId::new(2_001), BalanceCents::new(25_500));
+
+        assert_eq!(
+            result,
+            InsertResult::Replaced {
+                previous: BalanceCents::new(20_010),
+            }
+        );
+        assert_eq!(branch.entry_count(), entry_count_before);
+        assert_eq!(
+            branch
+                .child_for_key(&AccountId::new(2_001))
+                .get(&AccountId::new(2_001)),
+            Some(&BalanceCents::new(25_500))
+        );
+    }
+
+    #[test]
+    fn branch_absorbs_stable_child_insertion() {
+        let mut branch = account_branch();
+
+        let result = branch.insert(AccountId::new(1_750), BalanceCents::new(21_875));
+
+        assert_eq!(result, InsertResult::Inserted);
+        assert_eq!(branch.entry_count(), 7);
+        assert_eq!(
+            branch
+                .child_for_key(&AccountId::new(1_750))
+                .get(&AccountId::new(1_750)),
+            Some(&BalanceCents::new(21_875))
+        );
+    }
+
+    #[test]
+    fn branch_absorbs_child_split_when_not_full() {
+        let mut branch: BranchNode<AccountId, BalanceCents, 3> = BranchNode::from_sorted_parts(
+            Node::from_leaf(account_leaf([1_001, 1_501, 1_751])),
+            (
+                AccountId::new(2_001),
+                Node::from_leaf(account_leaf([2_001, 2_501])),
+            ),
+            [],
+        );
+
+        let result = branch.insert(AccountId::new(1_601), BalanceCents::new(20_000));
+
+        assert_eq!(result, InsertResult::Inserted);
+        assert_eq!(
+            branch,
+            BranchNode::from_sorted_parts(
+                Node::from_leaf(account_leaf([1_001, 1_501])),
+                (
+                    AccountId::new(1_601),
+                    Node::from_sorted_entries([
+                        (AccountId::new(1_601), BalanceCents::new(20_000)),
+                        (AccountId::new(1_751), BalanceCents::new(17_510)),
+                    ]),
+                ),
+                [(
+                    AccountId::new(2_001),
+                    Node::from_leaf(account_leaf([2_001, 2_501])),
+                )],
+            )
+        );
+    }
+
+    #[test]
+    fn branch_absorbs_first_right_child_split_in_order() {
+        let mut branch: BranchNode<AccountId, BalanceCents, 3> = BranchNode::from_sorted_parts(
+            Node::from_leaf(account_leaf([1_001, 1_501])),
+            (
+                AccountId::new(2_001),
+                Node::from_leaf(account_leaf([2_001, 2_501, 2_751])),
+            ),
+            [],
+        );
+
+        let result = branch.insert(AccountId::new(2_601), BalanceCents::new(32_500));
+
+        assert_eq!(result, InsertResult::Inserted);
+        assert_eq!(
+            branch,
+            BranchNode::from_sorted_parts(
+                Node::from_leaf(account_leaf([1_001, 1_501])),
+                (
+                    AccountId::new(2_001),
+                    Node::from_leaf(account_leaf([2_001, 2_501])),
+                ),
+                [(
+                    AccountId::new(2_601),
+                    Node::from_sorted_entries([
+                        (AccountId::new(2_601), BalanceCents::new(32_500)),
+                        (AccountId::new(2_751), BalanceCents::new(27_510)),
+                    ]),
+                )],
+            )
+        );
+    }
+
+    #[test]
+    fn branch_absorbs_remaining_child_split_in_order() {
+        let mut branch: BranchNode<AccountId, BalanceCents, 3> = BranchNode::from_sorted_parts(
+            Node::from_leaf(account_leaf([1_001, 1_501])),
+            (
+                AccountId::new(2_001),
+                Node::from_leaf(account_leaf([2_001, 2_501])),
+            ),
+            [(
+                AccountId::new(3_001),
+                Node::from_leaf(account_leaf([3_001, 3_501, 3_751])),
+            )],
+        );
+
+        let result = branch.insert(AccountId::new(3_601), BalanceCents::new(45_000));
+
+        assert_eq!(result, InsertResult::Inserted);
+        assert_eq!(
+            branch,
+            BranchNode::from_sorted_parts(
+                Node::from_leaf(account_leaf([1_001, 1_501])),
+                (
+                    AccountId::new(2_001),
+                    Node::from_leaf(account_leaf([2_001, 2_501])),
+                ),
+                [
+                    (
+                        AccountId::new(3_001),
+                        Node::from_leaf(account_leaf([3_001, 3_501])),
+                    ),
+                    (
+                        AccountId::new(3_601),
+                        Node::from_sorted_entries([
+                            (AccountId::new(3_601), BalanceCents::new(45_000)),
+                            (AccountId::new(3_751), BalanceCents::new(37_510)),
+                        ]),
+                    ),
+                ],
+            )
+        );
+    }
+
+    #[test]
+    fn branch_split_promotes_exactly_one_separator() {
+        let mut branch: BranchNode<AccountId, BalanceCents, 3> = BranchNode::from_sorted_parts(
+            Node::from_leaf(account_leaf([1_001, 1_101, 1_201])),
+            (
+                AccountId::new(2_001),
+                Node::from_leaf(account_leaf([2_001, 2_101])),
+            ),
+            [
+                (
+                    AccountId::new(3_001),
+                    Node::from_leaf(account_leaf([3_001, 3_101])),
+                ),
+                (
+                    AccountId::new(4_001),
+                    Node::from_leaf(account_leaf([4_001, 4_101])),
+                ),
+            ],
+        );
+
+        let result = branch.insert(AccountId::new(1_151), BalanceCents::new(14_375));
+
+        assert_eq!(
+            branch,
+            BranchNode::from_sorted_parts(
+                Node::from_leaf(account_leaf([1_001, 1_101])),
+                (
+                    AccountId::new(1_151),
+                    Node::from_sorted_entries([
+                        (AccountId::new(1_151), BalanceCents::new(14_375)),
+                        (AccountId::new(1_201), BalanceCents::new(12_010)),
+                    ]),
+                ),
+                [(
+                    AccountId::new(2_001),
+                    Node::from_leaf(account_leaf([2_001, 2_101])),
+                )],
+            )
+        );
+        assert_eq!(
+            result,
+            InsertResult::InsertedAndSplit {
+                separator: AccountId::new(3_001),
+                right: Box::new(Node::from_sorted_branch(
+                    Node::from_leaf(account_leaf([3_001, 3_101])),
+                    (
+                        AccountId::new(4_001),
+                        Node::from_leaf(account_leaf([4_001, 4_101])),
+                    ),
+                    [],
+                )),
+            }
+        );
     }
 }

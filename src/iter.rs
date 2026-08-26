@@ -478,13 +478,184 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::cmp::Ordering;
+    use std::collections::BTreeMap as StandardBTreeMap;
     use std::ops::Bound;
+
+    use proptest::collection;
+    use proptest::prelude::*;
+    use proptest::test_runner::TestCaseError;
+    use proptest::test_runner::TestCaseResult;
 
     use super::RangeError;
     use crate::BTree;
     use crate::InsertOutcome;
 
     type AccountBalances = BTree<String, u64, 3>;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    struct GeneratedAccountId(u16);
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct GeneratedBalanceCents(u64);
+
+    #[derive(Clone, Copy, Debug)]
+    enum GeneratedBound {
+        Unbounded,
+        Included(GeneratedAccountId),
+        Excluded(GeneratedAccountId),
+    }
+
+    impl GeneratedBound {
+        const fn as_bound(self) -> Bound<GeneratedAccountId> {
+            match self {
+                Self::Unbounded => Bound::Unbounded,
+                Self::Included(account_id) => Bound::Included(account_id),
+                Self::Excluded(account_id) => Bound::Excluded(account_id),
+            }
+        }
+
+        fn admits_start(self, account_id: &GeneratedAccountId) -> bool {
+            match self {
+                Self::Unbounded => true,
+                Self::Included(bound) => account_id >= &bound,
+                Self::Excluded(bound) => account_id > &bound,
+            }
+        }
+
+        fn admits_end(self, account_id: &GeneratedAccountId) -> bool {
+            match self {
+                Self::Unbounded => true,
+                Self::Included(bound) => account_id <= &bound,
+                Self::Excluded(bound) => account_id < &bound,
+            }
+        }
+    }
+
+    fn generated_account_id() -> impl Strategy<Value = GeneratedAccountId> {
+        (1_001_u16..1_129).prop_map(GeneratedAccountId)
+    }
+
+    fn generated_balance() -> impl Strategy<Value = GeneratedBalanceCents> {
+        (100_u64..10_000_000).prop_map(GeneratedBalanceCents)
+    }
+
+    fn generated_bound() -> impl Strategy<Value = GeneratedBound> {
+        prop_oneof![
+            Just(GeneratedBound::Unbounded),
+            generated_account_id().prop_map(GeneratedBound::Included),
+            generated_account_id().prop_map(GeneratedBound::Excluded),
+        ]
+    }
+
+    fn expected_range_error(start: GeneratedBound, end: GeneratedBound) -> Option<RangeError> {
+        match (start, end) {
+            (GeneratedBound::Unbounded, _) | (_, GeneratedBound::Unbounded) => None,
+            (GeneratedBound::Included(start), GeneratedBound::Included(end)) => {
+                match start.cmp(&end) {
+                    Ordering::Less | Ordering::Equal => None,
+                    Ordering::Greater => Some(RangeError::StartAfterEnd),
+                }
+            }
+            (
+                GeneratedBound::Included(start) | GeneratedBound::Excluded(start),
+                GeneratedBound::Included(end) | GeneratedBound::Excluded(end),
+            ) => match start.cmp(&end) {
+                Ordering::Less => None,
+                Ordering::Equal => Some(RangeError::EmptyExcludedBounds),
+                Ordering::Greater => Some(RangeError::StartAfterEnd),
+            },
+        }
+    }
+
+    fn assert_ranges_match_standard<const CAPACITY: usize>(
+        entries: &[(GeneratedAccountId, GeneratedBalanceCents)],
+        start: GeneratedBound,
+        end: GeneratedBound,
+    ) -> TestCaseResult {
+        let mut actual = BTree::<GeneratedAccountId, GeneratedBalanceCents, CAPACITY>::new();
+        let mut standard = StandardBTreeMap::new();
+
+        entries.iter().copied().for_each(|(account_id, balance)| {
+            let _outcome = actual.insert(account_id, balance);
+            standard.insert(account_id, balance);
+        });
+
+        let actual_range = actual.range((start.as_bound(), end.as_bound()));
+        match (actual_range, expected_range_error(start, end)) {
+            (Err(actual_error), Some(expected_error)) => {
+                prop_assert_eq!(actual_error, expected_error);
+            }
+            (Ok(range), None) => {
+                let expected_entries: Vec<_> = standard
+                    .iter()
+                    .filter(|(account_id, _balance)| {
+                        start.admits_start(account_id) && end.admits_end(account_id)
+                    })
+                    .map(|(account_id, balance)| (*account_id, *balance))
+                    .collect();
+                let actual_entries: Vec<_> = range
+                    .map(|(account_id, balance)| (*account_id, *balance))
+                    .collect();
+                prop_assert_eq!(&actual_entries, &expected_entries);
+
+                let Ok(reverse_range) = actual.range((start.as_bound(), end.as_bound())) else {
+                    return Err(TestCaseError::fail(
+                        "a validated range failed when reopened for reverse traversal",
+                    ));
+                };
+                let actual_reverse: Vec<_> = reverse_range
+                    .rev()
+                    .map(|(account_id, balance)| (*account_id, *balance))
+                    .collect();
+                let expected_reverse: Vec<_> = expected_entries.into_iter().rev().collect();
+                prop_assert_eq!(actual_reverse, expected_reverse);
+            }
+            (Err(actual_error), None) => {
+                return Err(TestCaseError::fail(format!(
+                    "valid mathematical bounds returned {actual_error:?}"
+                )));
+            }
+            (Ok(_range), Some(expected_error)) => {
+                return Err(TestCaseError::fail(format!(
+                    "invalid mathematical bounds did not return {expected_error:?}"
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn generated_ranges_match_mathematical_model_at_capacity_three(
+            entries in collection::vec((generated_account_id(), generated_balance()), 0..96),
+            start in generated_bound(),
+            end in generated_bound(),
+        ) {
+            assert_ranges_match_standard::<3>(&entries, start, end)?;
+        }
+
+        #[test]
+        fn generated_ranges_match_mathematical_model_at_capacity_four(
+            entries in collection::vec((generated_account_id(), generated_balance()), 0..96),
+            start in generated_bound(),
+            end in generated_bound(),
+        ) {
+            assert_ranges_match_standard::<4>(&entries, start, end)?;
+        }
+
+        #[test]
+        fn generated_ranges_match_mathematical_model_at_capacity_thirty_two(
+            entries in collection::vec((generated_account_id(), generated_balance()), 0..96),
+            start in generated_bound(),
+            end in generated_bound(),
+        ) {
+            assert_ranges_match_standard::<32>(&entries, start, end)?;
+        }
+    }
 
     fn account_balances(account_ids: impl IntoIterator<Item = u64>) -> AccountBalances {
         let mut balances = AccountBalances::new();

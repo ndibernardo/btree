@@ -293,12 +293,182 @@ impl<K, V, const CAPACITY: usize> BTree<K, V, CAPACITY> {
 mod tests {
     use std::collections::BTreeMap as StandardBTreeMap;
 
+    use proptest::collection;
+    use proptest::prelude::*;
+    use proptest::test_runner::TestCaseError;
+    use proptest::test_runner::TestCaseResult;
+
     use super::BTree;
     use super::InsertOutcome;
     use super::RemoveOutcome;
     use crate::node::Node;
 
     type AccountBalances = BTree<String, u64, 3>;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    struct GeneratedAccountId(u16);
+
+    impl GeneratedAccountId {
+        const fn new(value: u16) -> Self {
+            Self(value)
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct GeneratedBalanceCents(u64);
+
+    impl GeneratedBalanceCents {
+        const fn new(value: u64) -> Self {
+            Self(value)
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum MapOperation {
+        Insert {
+            account_id: GeneratedAccountId,
+            balance: GeneratedBalanceCents,
+        },
+        Remove {
+            account_id: GeneratedAccountId,
+        },
+        Lookup {
+            account_id: GeneratedAccountId,
+        },
+    }
+
+    fn generated_account_id() -> impl Strategy<Value = GeneratedAccountId> {
+        (1_001_u16..1_129).prop_map(GeneratedAccountId::new)
+    }
+
+    fn generated_balance() -> impl Strategy<Value = GeneratedBalanceCents> {
+        (100_u64..10_000_000).prop_map(GeneratedBalanceCents::new)
+    }
+
+    fn map_operation() -> impl Strategy<Value = MapOperation> {
+        prop_oneof![
+            4 => (generated_account_id(), generated_balance()).prop_map(
+                |(account_id, balance)| MapOperation::Insert {
+                    account_id,
+                    balance,
+                },
+            ),
+            3 => generated_account_id().prop_map(|account_id| MapOperation::Remove {
+                account_id,
+            }),
+            2 => generated_account_id().prop_map(|account_id| MapOperation::Lookup {
+                account_id,
+            }),
+        ]
+    }
+
+    fn assert_operations_match_standard<const CAPACITY: usize>(
+        operations: &[MapOperation],
+    ) -> TestCaseResult {
+        let mut actual = BTree::<GeneratedAccountId, GeneratedBalanceCents, CAPACITY>::new();
+        let mut expected = StandardBTreeMap::new();
+
+        operations.iter().copied().try_for_each(|operation| {
+            match operation {
+                MapOperation::Insert {
+                    account_id,
+                    balance,
+                } => {
+                    let actual_outcome = actual.insert(account_id, balance);
+                    let expected_previous = expected.insert(account_id, balance);
+
+                    match (actual_outcome, expected_previous) {
+                        (InsertOutcome::Inserted, None) => {}
+                        (
+                            InsertOutcome::Replaced {
+                                previous: actual_previous,
+                            },
+                            Some(expected_previous),
+                        ) => prop_assert_eq!(actual_previous, expected_previous),
+                        (actual_outcome, expected_previous) => {
+                            return Err(TestCaseError::fail(format!(
+                                "insert outcome differs: {actual_outcome:?} versus {expected_previous:?}"
+                            )));
+                        }
+                    }
+                }
+                MapOperation::Remove { account_id } => {
+                    let actual_outcome = actual.remove(&account_id);
+                    let expected_value = expected.remove(&account_id);
+
+                    match (actual_outcome, expected_value) {
+                        (RemoveOutcome::Missing, None) => {}
+                        (
+                            RemoveOutcome::Removed {
+                                value: actual_value,
+                            },
+                            Some(expected_value),
+                        ) => prop_assert_eq!(actual_value, expected_value),
+                        (actual_outcome, expected_value) => {
+                            return Err(TestCaseError::fail(format!(
+                                "remove outcome differs: {actual_outcome:?} versus {expected_value:?}"
+                            )));
+                        }
+                    }
+                }
+                MapOperation::Lookup { account_id } => {
+                    prop_assert_eq!(actual.get(&account_id), expected.get(&account_id));
+                    prop_assert_eq!(
+                        actual.contains_key(&account_id),
+                        expected.contains_key(&account_id)
+                    );
+                }
+            }
+
+            actual.assert_valid();
+            prop_assert_eq!(actual.len(), expected.len());
+            prop_assert_eq!(actual.first_key_value(), expected.first_key_value());
+            prop_assert_eq!(actual.last_key_value(), expected.last_key_value());
+            prop_assert!(actual.iter().eq(expected.iter()));
+            prop_assert!(actual.iter().rev().eq(expected.iter().rev()));
+
+            Ok(())
+        })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn generated_operations_match_standard_map_at_capacity_three(
+            operations in collection::vec(map_operation(), 0..128),
+        ) {
+            assert_operations_match_standard::<3>(&operations)?;
+        }
+
+        #[test]
+        fn generated_operations_match_standard_map_at_capacity_four(
+            operations in collection::vec(map_operation(), 0..128),
+        ) {
+            assert_operations_match_standard::<4>(&operations)?;
+        }
+
+        #[test]
+        fn generated_operations_match_standard_map_at_capacity_five(
+            operations in collection::vec(map_operation(), 0..128),
+        ) {
+            assert_operations_match_standard::<5>(&operations)?;
+        }
+
+        #[test]
+        fn generated_operations_match_standard_map_at_capacity_eight(
+            operations in collection::vec(map_operation(), 0..128),
+        ) {
+            assert_operations_match_standard::<8>(&operations)?;
+        }
+
+        #[test]
+        fn generated_operations_match_standard_map_at_capacity_thirty_two(
+            operations in collection::vec(map_operation(), 0..128),
+        ) {
+            assert_operations_match_standard::<32>(&operations)?;
+        }
+    }
 
     fn leaf_balances() -> AccountBalances {
         AccountBalances::from_test_root(Node::from_sorted_entries([

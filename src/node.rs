@@ -33,6 +33,55 @@ pub(crate) enum InsertResult<K, V, const CAPACITY: usize> {
     },
 }
 
+/// Result of removing from a subtree.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RemoveResult<K, V> {
+    Missing,
+    Removed {
+        value: V,
+        occupancy: OccupancyChange<K>,
+    },
+}
+
+/// Occupancy and minimum-key change after removal.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum OccupancyChange<K> {
+    Stable { minimum: MinimumChange<K> },
+    Underflow { minimum: MinimumChange<K> },
+}
+
+/// Change to a subtree's minimum key.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum MinimumChange<K> {
+    Unchanged,
+    Changed(K),
+    Removed,
+}
+
+impl<K: Ord + Clone> MinimumChange<K> {
+    fn between(previous: Option<K>, current: Option<&K>) -> Self {
+        match (previous, current) {
+            (Some(previous), Some(current)) if &previous == current => Self::Unchanged,
+            (Some(_previous), Some(current)) => Self::Changed(current.clone()),
+            (None, Some(current)) => Self::Changed(current.clone()),
+            (Some(_previous), None) => Self::Removed,
+            (None, None) => Self::Unchanged,
+        }
+    }
+}
+
+/// Leaf- or branch-local removal before occupancy is classified.
+enum Removal<V> {
+    Missing,
+    Removed(V),
+}
+
+type AdjacentChildrenMut<'a, K, V, const CAPACITY: usize> = (
+    &'a mut Node<K, V, CAPACITY>,
+    &'a mut K,
+    &'a mut Node<K, V, CAPACITY>,
+);
+
 impl<K, V, const CAPACITY: usize> Node<K, V, CAPACITY> {
     /// Creates the canonical empty root node.
     pub(crate) fn empty_leaf() -> Self {
@@ -95,6 +144,46 @@ impl<K, V, const CAPACITY: usize> Node<K, V, CAPACITY> {
         }
     }
 
+    /// Returns the minimum leaf key in this subtree.
+    fn minimum_key(&self) -> Option<&K> {
+        match self {
+            Self::Leaf(leaf) => leaf.entries.first().map(Entry::key),
+            Self::Branch(branch) => branch.leftmost.minimum_key(),
+        }
+    }
+
+    fn is_underfull(&self) -> bool {
+        match self {
+            Self::Leaf(leaf) => leaf.entries.len() < CAPACITY.div_ceil(2),
+            Self::Branch(branch) => branch.child_count() < CAPACITY.saturating_add(1).div_ceil(2),
+        }
+    }
+
+    fn can_lend(&self) -> bool {
+        match self {
+            Self::Leaf(leaf) => leaf.entries.len() > CAPACITY.div_ceil(2),
+            Self::Branch(branch) => branch.child_count() > CAPACITY.saturating_add(1).div_ceil(2),
+        }
+    }
+
+    /// Collapses transient one-child branches at the root.
+    pub(crate) fn normalize_root(&mut self) {
+        loop {
+            match self {
+                Self::Leaf(_leaf) => return,
+                Self::Branch(branch) => {
+                    if branch.child_count() != 1 {
+                        return;
+                    }
+
+                    let child =
+                        std::mem::replace(&mut branch.leftmost, Box::new(Self::empty_leaf()));
+                    *self = *child;
+                }
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn is_empty_leaf(&self) -> bool {
         match self {
@@ -152,6 +241,107 @@ impl<K, V, const CAPACITY: usize> Node<K, V, CAPACITY> {
         match self {
             Self::Leaf(_leaf) => 0,
             Self::Branch(branch) => branch.height(),
+        }
+    }
+}
+
+impl<K: Ord + Clone, V, const CAPACITY: usize> Node<K, V, CAPACITY> {
+    /// Removes from this subtree and reports occupancy changes.
+    pub(crate) fn remove<Q>(&mut self, key: &Q) -> RemoveResult<K, V>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        let previous_minimum = self.minimum_key().cloned();
+        let removal = match self {
+            Self::Leaf(leaf) => leaf.remove(key),
+            Self::Branch(branch) => branch.remove(key),
+        };
+
+        match removal {
+            Removal::Missing => RemoveResult::Missing,
+            Removal::Removed(value) => {
+                let minimum = MinimumChange::between(previous_minimum, self.minimum_key());
+                let occupancy = if self.is_underfull() {
+                    OccupancyChange::Underflow { minimum }
+                } else {
+                    OccupancyChange::Stable { minimum }
+                };
+                RemoveResult::Removed { value, occupancy }
+            }
+        }
+    }
+
+    fn borrow_from_left(left: &mut Self, separator: &mut K, right: &mut Self) {
+        match (left, right) {
+            (Self::Leaf(left), Self::Leaf(right)) => {
+                let entry = match left.entries.pop() {
+                    Some(entry) => entry,
+                    None => unreachable!("a lending leaf contains an entry"),
+                };
+                *separator = entry.key().clone();
+                right.entries.insert(0, entry);
+            }
+            (Self::Branch(left), Self::Branch(right)) => {
+                let edge = match left.rightward.pop() {
+                    Some(edge) => edge,
+                    None => unreachable!("a lending branch contains a rightward child"),
+                };
+                let previous_leftmost = std::mem::replace(&mut right.leftmost, edge.child);
+                let previous_separator = std::mem::replace(separator, edge.lower_bound);
+                right
+                    .rightward
+                    .insert(0, BranchEdge::new(previous_separator, previous_leftmost));
+            }
+            (Self::Leaf(_left), Self::Branch(_right)) => {
+                unreachable!("balanced tree siblings have matching node shapes")
+            }
+            (Self::Branch(_left), Self::Leaf(_right)) => {
+                unreachable!("balanced tree siblings have matching node shapes")
+            }
+        }
+    }
+
+    fn borrow_from_right(left: &mut Self, separator: &mut K, right: &mut Self) {
+        match (left, right) {
+            (Self::Leaf(left), Self::Leaf(right)) => {
+                let entry = right.entries.remove(0);
+                left.entries.push(entry);
+                *separator = right.entries[0].key().clone();
+            }
+            (Self::Branch(left), Self::Branch(right)) => {
+                let edge = right.rightward.remove(0);
+                let borrowed = std::mem::replace(&mut right.leftmost, edge.child);
+                let previous_separator = std::mem::replace(separator, edge.lower_bound);
+                left.rightward
+                    .push(BranchEdge::new(previous_separator, borrowed));
+            }
+            (Self::Leaf(_left), Self::Branch(_right)) => {
+                unreachable!("balanced tree siblings have matching node shapes")
+            }
+            (Self::Branch(_left), Self::Leaf(_right)) => {
+                unreachable!("balanced tree siblings have matching node shapes")
+            }
+        }
+    }
+
+    fn merge_right(&mut self, separator: K, right: Self) {
+        match (self, right) {
+            (Self::Leaf(left), Self::Leaf(mut right)) => {
+                let _separator = separator;
+                left.entries.append(&mut right.entries);
+            }
+            (Self::Branch(left), Self::Branch(mut right)) => {
+                left.rightward
+                    .push(BranchEdge::new(separator, right.leftmost));
+                left.rightward.append(&mut right.rightward);
+            }
+            (Self::Leaf(_left), Self::Branch(_right)) => {
+                unreachable!("balanced tree siblings have matching node shapes")
+            }
+            (Self::Branch(_left), Self::Leaf(_right)) => {
+                unreachable!("balanced tree siblings have matching node shapes")
+            }
         }
     }
 }
@@ -314,6 +504,20 @@ impl<K, V, const CAPACITY: usize> LeafNode<K, V, CAPACITY> {
         InsertResult::InsertedAndSplit { separator, right }
     }
 
+    fn remove<Q>(&mut self, key: &Q) -> Removal<V>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        match self.search(key) {
+            SearchSlot::Occupied(index) => {
+                let Entry { value, .. } = self.entries.remove(index.get());
+                Removal::Removed(value)
+            }
+            SearchSlot::Vacant(_insertion_index) => Removal::Missing,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn from_sorted_entries(entries: impl IntoIterator<Item = (K, V)>) -> Self {
         Self {
@@ -335,12 +539,14 @@ impl<K, V, const CAPACITY: usize> LeafNode<K, V, CAPACITY> {
     }
 }
 
-/// Branch with at least two children.
+/// Leftmost child plus ordered separator-child edges.
+///
+/// Stable branches have at least two children. Removal may temporarily leave one
+/// child while underflow propagates to the parent or root.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct BranchNode<K, V, const CAPACITY: usize> {
     leftmost: Box<Node<K, V, CAPACITY>>,
-    first_right: BranchEdge<K, V, CAPACITY>,
-    remaining: Vec<BranchEdge<K, V, CAPACITY>>,
+    rightward: Vec<BranchEdge<K, V, CAPACITY>>,
 }
 
 impl<K, V, const CAPACITY: usize> BranchNode<K, V, CAPACITY> {
@@ -349,10 +555,12 @@ impl<K, V, const CAPACITY: usize> BranchNode<K, V, CAPACITY> {
         lower_bound: K,
         right: Box<Node<K, V, CAPACITY>>,
     ) -> Self {
+        let mut rightward = Vec::with_capacity(CAPACITY.saturating_add(1));
+        rightward.push(BranchEdge::new(lower_bound, right));
+
         Self {
             leftmost: Box::new(leftmost),
-            first_right: BranchEdge::new(lower_bound, right),
-            remaining: Vec::with_capacity(CAPACITY),
+            rightward,
         }
     }
 
@@ -365,13 +573,13 @@ impl<K, V, const CAPACITY: usize> BranchNode<K, V, CAPACITY> {
     }
 
     fn rightmost_child(&self) -> &Node<K, V, CAPACITY> {
-        self.remaining
+        self.rightward
             .last()
-            .map_or(self.first_right.child.as_ref(), |edge| edge.child.as_ref())
+            .map_or(self.leftmost.as_ref(), |edge| edge.child.as_ref())
     }
 
     fn edge_count(&self) -> usize {
-        self.remaining.len().saturating_add(1)
+        self.rightward.len()
     }
 
     /// Returns the number of child subtrees available to a cursor.
@@ -379,24 +587,15 @@ impl<K, V, const CAPACITY: usize> BranchNode<K, V, CAPACITY> {
         self.edge_count().saturating_add(1)
     }
 
-    fn child_position<Q>(&self, key: &Q) -> ChildPosition
+    fn child_position<Q>(&self, key: &Q) -> ChildIndex
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        match self.first_right.lower_bound.borrow().cmp(key) {
-            Ordering::Greater => ChildPosition::Leftmost,
-            Ordering::Less | Ordering::Equal => {
-                let rightward_count = self.remaining.partition_point(|edge| {
-                    edge.lower_bound.borrow().cmp(key) != Ordering::Greater
-                });
-
-                match rightward_count {
-                    0 => ChildPosition::FirstRight,
-                    count => ChildPosition::Remaining(EdgeIndex::new(count - 1)),
-                }
-            }
-        }
+        ChildIndex::new(
+            self.rightward
+                .partition_point(|edge| edge.lower_bound.borrow().cmp(key) != Ordering::Greater),
+        )
     }
 
     /// Returns the child index selected for a key.
@@ -405,21 +604,16 @@ impl<K, V, const CAPACITY: usize> BranchNode<K, V, CAPACITY> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        match self.child_position(key) {
-            ChildPosition::Leftmost => 0,
-            ChildPosition::FirstRight => 1,
-            ChildPosition::Remaining(index) => index.get().saturating_add(2),
-        }
+        self.child_position(key).get()
     }
 
     /// Returns the child at an ordered cursor position.
     pub(crate) fn child_at(&self, index: usize) -> Option<&Node<K, V, CAPACITY>> {
         match index {
             0 => Some(self.leftmost.as_ref()),
-            1 => Some(self.first_right.child.as_ref()),
-            remaining => self
-                .remaining
-                .get(remaining.saturating_sub(2))
+            rightward => self
+                .rightward
+                .get(rightward.saturating_sub(1))
                 .map(|edge| edge.child.as_ref()),
         }
     }
@@ -429,10 +623,9 @@ impl<K, V, const CAPACITY: usize> BranchNode<K, V, CAPACITY> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        match self.child_position(key) {
-            ChildPosition::Leftmost => self.leftmost.as_ref(),
-            ChildPosition::FirstRight => self.first_right.child.as_ref(),
-            ChildPosition::Remaining(index) => self.remaining[index.get()].child.as_ref(),
+        match self.child_position(key).get() {
+            0 => self.leftmost.as_ref(),
+            rightward => self.rightward[rightward - 1].child.as_ref(),
         }
     }
 
@@ -445,11 +638,10 @@ impl<K, V, const CAPACITY: usize> BranchNode<K, V, CAPACITY> {
         self.child_at_position_mut(position)
     }
 
-    fn child_at_position_mut(&mut self, position: ChildPosition) -> &mut Node<K, V, CAPACITY> {
-        match position {
-            ChildPosition::Leftmost => self.leftmost.as_mut(),
-            ChildPosition::FirstRight => self.first_right.child.as_mut(),
-            ChildPosition::Remaining(index) => self.remaining[index.get()].child.as_mut(),
+    fn child_at_position_mut(&mut self, position: ChildIndex) -> &mut Node<K, V, CAPACITY> {
+        match position.get() {
+            0 => self.leftmost.as_mut(),
+            rightward => self.rightward[rightward - 1].child.as_mut(),
         }
     }
 
@@ -463,10 +655,12 @@ impl<K, V, const CAPACITY: usize> BranchNode<K, V, CAPACITY> {
 
         Self {
             leftmost: Box::new(leftmost),
-            first_right: BranchEdge::from_node(lower_bound, child),
-            remaining: remaining
-                .into_iter()
-                .map(|(lower_bound, child)| BranchEdge::from_node(lower_bound, child))
+            rightward: std::iter::once(BranchEdge::from_node(lower_bound, child))
+                .chain(
+                    remaining
+                        .into_iter()
+                        .map(|(lower_bound, child)| BranchEdge::from_node(lower_bound, child)),
+                )
                 .collect(),
         }
     }
@@ -474,9 +668,8 @@ impl<K, V, const CAPACITY: usize> BranchNode<K, V, CAPACITY> {
     #[cfg(test)]
     fn allocated_entry_capacity(&self) -> usize {
         self.leftmost.allocated_entry_capacity()
-            + self.first_right.child.allocated_entry_capacity()
             + self
-                .remaining
+                .rightward
                 .iter()
                 .map(|edge| edge.child.allocated_entry_capacity())
                 .sum::<usize>()
@@ -485,9 +678,8 @@ impl<K, V, const CAPACITY: usize> BranchNode<K, V, CAPACITY> {
     #[cfg(test)]
     fn entry_count(&self) -> usize {
         self.leftmost.entry_count()
-            + self.first_right.child.entry_count()
             + self
-                .remaining
+                .rightward
                 .iter()
                 .map(|edge| edge.child.entry_count())
                 .sum::<usize>()
@@ -515,7 +707,7 @@ impl<K: Ord + Clone, V, const CAPACITY: usize> BranchNode<K, V, CAPACITY> {
 
     fn absorb_child_split(
         &mut self,
-        position: ChildPosition,
+        position: ChildIndex,
         separator: K,
         right: Box<Node<K, V, CAPACITY>>,
     ) -> InsertResult<K, V, CAPACITY> {
@@ -530,38 +722,156 @@ impl<K: Ord + Clone, V, const CAPACITY: usize> BranchNode<K, V, CAPACITY> {
     }
 
     fn reserve_overflow_capacity(&mut self) {
-        let additional = CAPACITY.saturating_sub(self.remaining.len());
-        self.remaining.reserve_exact(additional);
+        let overflow_capacity = CAPACITY.saturating_add(1);
+        let additional = overflow_capacity.saturating_sub(self.rightward.len());
+        self.rightward.reserve_exact(additional);
     }
 
-    fn insert_edge_after(&mut self, position: ChildPosition, edge: BranchEdge<K, V, CAPACITY>) {
-        match position {
-            ChildPosition::Leftmost => {
-                let previous_first = std::mem::replace(&mut self.first_right, edge);
-                self.remaining.insert(0, previous_first);
-            }
-            ChildPosition::FirstRight => self.remaining.insert(0, edge),
-            ChildPosition::Remaining(index) => self.remaining.insert(index.get() + 1, edge),
-        }
+    fn insert_edge_after(&mut self, position: ChildIndex, edge: BranchEdge<K, V, CAPACITY>) {
+        self.rightward.insert(position.get(), edge);
     }
 
     fn split(&mut self) -> InsertResult<K, V, CAPACITY> {
         let promoted_index = CAPACITY.saturating_add(1) / 2;
-        let mut right_edges = self.remaining.split_off(promoted_index);
-        let promoted = self.remaining.remove(promoted_index - 1);
-        let right_first = right_edges.remove(0);
-        let additional = CAPACITY.saturating_sub(right_edges.len());
+        let mut right_edges = self.rightward.split_off(promoted_index.saturating_add(1));
+        let promoted = self.rightward.remove(promoted_index);
+        let additional = CAPACITY.saturating_add(1).saturating_sub(right_edges.len());
         right_edges.reserve_exact(additional);
         let right = Box::new(Node::Branch(Self {
             leftmost: promoted.child,
-            first_right: right_first,
-            remaining: right_edges,
+            rightward: right_edges,
         }));
 
         InsertResult::InsertedAndSplit {
             separator: promoted.lower_bound,
             right,
         }
+    }
+
+    fn remove<Q>(&mut self, key: &Q) -> Removal<V>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        let child_index = self.child_position(key);
+        let child_result = self.child_at_position_mut(child_index).remove(key);
+
+        match child_result {
+            RemoveResult::Missing => Removal::Missing,
+            RemoveResult::Removed { value, occupancy } => {
+                self.absorb_child_removal(child_index, occupancy);
+                Removal::Removed(value)
+            }
+        }
+    }
+
+    fn absorb_child_removal(&mut self, child_index: ChildIndex, occupancy: OccupancyChange<K>) {
+        match occupancy {
+            OccupancyChange::Stable { minimum } => {
+                self.apply_stable_minimum(child_index, minimum);
+            }
+            OccupancyChange::Underflow { minimum } => {
+                self.apply_underflow_minimum(child_index, minimum);
+                self.rebalance_child(child_index);
+                self.refresh_separators();
+            }
+        }
+    }
+
+    fn apply_underflow_minimum(&mut self, child_index: ChildIndex, minimum: MinimumChange<K>) {
+        match (child_index.get(), minimum) {
+            (0, MinimumChange::Unchanged | MinimumChange::Removed) => {}
+            (0, MinimumChange::Changed(changed)) => drop(changed),
+            (_rightward, MinimumChange::Unchanged | MinimumChange::Removed) => {}
+            (rightward, MinimumChange::Changed(changed)) => {
+                self.rightward[rightward - 1].lower_bound = changed;
+            }
+        }
+    }
+
+    fn apply_stable_minimum(&mut self, child_index: ChildIndex, minimum: MinimumChange<K>) {
+        match (child_index.get(), minimum) {
+            (0, MinimumChange::Unchanged | MinimumChange::Removed) => {}
+            (0, MinimumChange::Changed(changed)) => drop(changed),
+            (_rightward, MinimumChange::Unchanged) => {}
+            (rightward, MinimumChange::Changed(changed)) => {
+                self.rightward[rightward - 1].lower_bound = changed;
+            }
+            (_rightward, MinimumChange::Removed) => self.refresh_separators(),
+        }
+    }
+
+    fn rebalance_child(&mut self, child_index: ChildIndex) {
+        let index = child_index.get();
+        let left_can_lend = index
+            .checked_sub(1)
+            .and_then(|left| self.child_at(left))
+            .is_some_and(Node::can_lend);
+        let right_can_lend = self
+            .child_at(index.saturating_add(1))
+            .is_some_and(Node::can_lend);
+
+        if left_can_lend {
+            self.borrow_from_left(index - 1);
+        } else if right_can_lend {
+            self.borrow_from_right(index);
+        } else if index > 0 {
+            self.merge_children(index - 1);
+        } else {
+            self.merge_children(0);
+        }
+    }
+
+    fn borrow_from_left(&mut self, separator_index: usize) {
+        let Some((left, separator, right)) = self.adjacent_children_mut(separator_index) else {
+            unreachable!("left sibling and separator exist for borrowing");
+        };
+        Node::borrow_from_left(left, separator, right);
+    }
+
+    fn borrow_from_right(&mut self, separator_index: usize) {
+        let Some((left, separator, right)) = self.adjacent_children_mut(separator_index) else {
+            unreachable!("right sibling and separator exist for borrowing");
+        };
+        Node::borrow_from_right(left, separator, right);
+    }
+
+    fn adjacent_children_mut(
+        &mut self,
+        separator_index: usize,
+    ) -> Option<AdjacentChildrenMut<'_, K, V, CAPACITY>> {
+        if separator_index == 0 {
+            let edge = self.rightward.get_mut(0)?;
+            return Some((
+                self.leftmost.as_mut(),
+                &mut edge.lower_bound,
+                edge.child.as_mut(),
+            ));
+        }
+
+        let (leftward, rightward) = self.rightward.split_at_mut(separator_index);
+        let left = leftward.get_mut(separator_index - 1)?;
+        let right = rightward.get_mut(0)?;
+        Some((
+            left.child.as_mut(),
+            &mut right.lower_bound,
+            right.child.as_mut(),
+        ))
+    }
+
+    fn merge_children(&mut self, separator_index: usize) {
+        let right = self.rightward.remove(separator_index);
+        let left = self.child_at_position_mut(ChildIndex::new(separator_index));
+        left.merge_right(right.lower_bound, *right.child);
+    }
+
+    fn refresh_separators(&mut self) {
+        self.rightward.iter_mut().for_each(|edge| {
+            let Some(minimum) = edge.child.minimum_key() else {
+                unreachable!("non-leftmost child contains a minimum key");
+            };
+            edge.lower_bound = minimum.clone();
+        });
     }
 }
 
@@ -583,19 +893,11 @@ impl<K, V, const CAPACITY: usize> BranchEdge<K, V, CAPACITY> {
     }
 }
 
-/// Child location selected by branch routing.
+/// Ordered child location selected by branch routing.
 #[derive(Clone, Copy)]
-enum ChildPosition {
-    Leftmost,
-    FirstRight,
-    Remaining(EdgeIndex),
-}
+struct ChildIndex(usize);
 
-/// Position in the branch edges after the first right child.
-#[derive(Clone, Copy)]
-struct EdgeIndex(usize);
-
-impl EdgeIndex {
+impl ChildIndex {
     const fn new(index: usize) -> Self {
         Self(index)
     }
@@ -644,7 +946,7 @@ impl ValidationStats {
 }
 
 #[cfg(test)]
-impl<K: Ord, V, const CAPACITY: usize> Node<K, V, CAPACITY> {
+impl<K: Ord + std::fmt::Debug, V, const CAPACITY: usize> Node<K, V, CAPACITY> {
     pub(crate) fn assert_valid_root(&self) -> usize {
         self.validate(ValidationPosition::Root).entry_count
     }
@@ -655,17 +957,10 @@ impl<K: Ord, V, const CAPACITY: usize> Node<K, V, CAPACITY> {
             Self::Branch(branch) => branch.validate(position),
         }
     }
-
-    fn minimum_key(&self) -> &K {
-        match self {
-            Self::Leaf(leaf) => leaf.entries[0].key(),
-            Self::Branch(branch) => branch.leftmost.minimum_key(),
-        }
-    }
 }
 
 #[cfg(test)]
-impl<K: Ord, V, const CAPACITY: usize> LeafNode<K, V, CAPACITY> {
+impl<K: Ord + std::fmt::Debug, V, const CAPACITY: usize> LeafNode<K, V, CAPACITY> {
     fn validate(&self, position: ValidationPosition) -> ValidationStats {
         assert!(self.entries.len() <= CAPACITY);
         assert!(
@@ -686,7 +981,7 @@ impl<K: Ord, V, const CAPACITY: usize> LeafNode<K, V, CAPACITY> {
 }
 
 #[cfg(test)]
-impl<K: Ord, V, const CAPACITY: usize> BranchNode<K, V, CAPACITY> {
+impl<K: Ord + std::fmt::Debug, V, const CAPACITY: usize> BranchNode<K, V, CAPACITY> {
     fn validate(&self, position: ValidationPosition) -> ValidationStats {
         let edge_count = self.edge_count();
         assert!(edge_count <= CAPACITY);
@@ -701,7 +996,7 @@ impl<K: Ord, V, const CAPACITY: usize> BranchNode<K, V, CAPACITY> {
 
         assert!(self.edges().map(|edge| &edge.lower_bound).is_sorted());
         self.edges().for_each(|edge| {
-            assert!(&edge.lower_bound == edge.child.minimum_key());
+            assert_eq!(Some(&edge.lower_bound), edge.child.minimum_key());
         });
 
         self.edges()
@@ -713,7 +1008,7 @@ impl<K: Ord, V, const CAPACITY: usize> BranchNode<K, V, CAPACITY> {
     }
 
     fn edges(&self) -> impl Iterator<Item = &BranchEdge<K, V, CAPACITY>> {
-        std::iter::once(&self.first_right).chain(self.remaining.iter())
+        self.rightward.iter()
     }
 }
 
@@ -750,7 +1045,10 @@ mod tests {
     use super::BranchNode;
     use super::InsertResult;
     use super::LeafNode;
+    use super::MinimumChange;
     use super::Node;
+    use super::OccupancyChange;
+    use super::RemoveResult;
     use super::SearchSlot;
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -770,6 +1068,8 @@ mod tests {
             Self(value)
         }
     }
+
+    type AccountNode = Node<AccountId, BalanceCents, 3>;
 
     fn account_leaf<const CAPACITY: usize>(
         account_ids: impl IntoIterator<Item = u64>,
@@ -794,6 +1094,39 @@ mod tests {
                 Node::from_leaf(account_leaf([3_001, 3_501])),
             )],
         )
+    }
+
+    fn account_branch_node<const CHILDREN: usize>(
+        child_accounts: [[u64; 2]; CHILDREN],
+    ) -> Node<AccountId, BalanceCents, 3> {
+        let mut children = child_accounts.into_iter();
+        let leftmost = children
+            .next()
+            .expect("test branch must contain a leftmost child");
+        let first_right = children
+            .next()
+            .expect("test branch must contain a right child");
+
+        Node::from_sorted_branch(
+            Node::from_leaf(account_leaf(leftmost)),
+            (
+                AccountId::new(first_right[0]),
+                Node::from_leaf(account_leaf(first_right)),
+            ),
+            children.map(|accounts| {
+                (
+                    AccountId::new(accounts[0]),
+                    Node::from_leaf(account_leaf(accounts)),
+                )
+            }),
+        )
+    }
+
+    fn underfull_account_branch(accounts: [u64; 2]) -> Node<AccountId, BalanceCents, 3> {
+        Node::Branch(BranchNode {
+            leftmost: Box::new(Node::from_leaf(account_leaf(accounts))),
+            rightward: Vec::new(),
+        })
     }
 
     fn account_ids<const CAPACITY: usize>(
@@ -1354,6 +1687,309 @@ mod tests {
                     [],
                 )),
             }
+        );
+    }
+
+    #[test]
+    fn remove_missing_leaf_key_reports_missing() {
+        let mut leaf = Node::from_leaf(account_leaf::<3>([1_001, 2_001, 3_001]));
+
+        let result = leaf.remove(&AccountId::new(2_501));
+
+        assert_eq!(result, RemoveResult::Missing);
+        assert_eq!(leaf, Node::from_leaf(account_leaf([1_001, 2_001, 3_001])));
+    }
+
+    #[test]
+    fn remove_from_occupied_leaf_remains_stable() {
+        let mut leaf = Node::from_leaf(account_leaf::<3>([1_001, 2_001, 3_001]));
+
+        let result = leaf.remove(&AccountId::new(2_001));
+
+        assert_eq!(
+            result,
+            RemoveResult::Removed {
+                value: BalanceCents::new(20_010),
+                occupancy: OccupancyChange::Stable {
+                    minimum: MinimumChange::Unchanged,
+                },
+            }
+        );
+        assert_eq!(leaf, Node::from_leaf(account_leaf([1_001, 3_001])));
+    }
+
+    #[test]
+    fn remove_leaf_minimum_reports_new_minimum() {
+        let mut leaf = Node::from_leaf(account_leaf::<3>([1_001, 2_001, 3_001]));
+
+        let result = leaf.remove(&AccountId::new(1_001));
+
+        assert_eq!(
+            result,
+            RemoveResult::Removed {
+                value: BalanceCents::new(10_010),
+                occupancy: OccupancyChange::Stable {
+                    minimum: MinimumChange::Changed(AccountId::new(2_001)),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn remove_from_minimal_leaf_reports_underflow() {
+        let mut leaf = Node::from_leaf(account_leaf::<3>([1_001, 2_001]));
+
+        let result = leaf.remove(&AccountId::new(1_001));
+
+        assert_eq!(
+            result,
+            RemoveResult::Removed {
+                value: BalanceCents::new(10_010),
+                occupancy: OccupancyChange::Underflow {
+                    minimum: MinimumChange::Changed(AccountId::new(2_001)),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn remove_last_leaf_key_reports_removed_minimum() {
+        let mut leaf = Node::from_leaf(account_leaf::<3>([1_001]));
+
+        let result = leaf.remove(&AccountId::new(1_001));
+
+        assert_eq!(
+            result,
+            RemoveResult::Removed {
+                value: BalanceCents::new(10_010),
+                occupancy: OccupancyChange::Underflow {
+                    minimum: MinimumChange::Removed,
+                },
+            }
+        );
+        assert!(leaf.is_empty_leaf());
+    }
+
+    #[test]
+    fn rebalance_leaf_borrows_from_left_sibling_first() {
+        let mut root: AccountNode = Node::from_sorted_branch(
+            Node::from_leaf(account_leaf([1_001, 1_501, 1_751])),
+            (
+                AccountId::new(2_001),
+                Node::from_leaf(account_leaf([2_001, 2_501])),
+            ),
+            [(
+                AccountId::new(3_001),
+                Node::from_leaf(account_leaf([3_001, 3_501, 3_751])),
+            )],
+        );
+
+        let result = root.remove(&AccountId::new(2_001));
+
+        assert_eq!(
+            result,
+            RemoveResult::Removed {
+                value: BalanceCents::new(20_010),
+                occupancy: OccupancyChange::Stable {
+                    minimum: MinimumChange::Unchanged,
+                },
+            }
+        );
+        assert_eq!(
+            root,
+            Node::from_sorted_branch(
+                Node::from_leaf(account_leaf([1_001, 1_501])),
+                (
+                    AccountId::new(1_751),
+                    Node::from_leaf(account_leaf([1_751, 2_501])),
+                ),
+                [(
+                    AccountId::new(3_001),
+                    Node::from_leaf(account_leaf([3_001, 3_501, 3_751])),
+                )],
+            )
+        );
+    }
+
+    #[test]
+    fn rebalance_leaf_borrows_from_right_sibling() {
+        let mut root: AccountNode = Node::from_sorted_branch(
+            Node::from_leaf(account_leaf([1_001, 1_501])),
+            (
+                AccountId::new(2_001),
+                Node::from_leaf(account_leaf([2_001, 2_501, 2_751])),
+            ),
+            [],
+        );
+
+        let result = root.remove(&AccountId::new(1_001));
+
+        assert_eq!(
+            result,
+            RemoveResult::Removed {
+                value: BalanceCents::new(10_010),
+                occupancy: OccupancyChange::Stable {
+                    minimum: MinimumChange::Changed(AccountId::new(1_501)),
+                },
+            }
+        );
+        assert_eq!(
+            root,
+            Node::from_sorted_branch(
+                Node::from_leaf(account_leaf([1_501, 2_001])),
+                (
+                    AccountId::new(2_501),
+                    Node::from_leaf(account_leaf([2_501, 2_751])),
+                ),
+                [],
+            )
+        );
+    }
+
+    #[test]
+    fn rebalance_leaf_merges_into_left_sibling() {
+        let mut root: AccountNode = Node::from_sorted_branch(
+            Node::from_leaf(account_leaf([1_001, 1_501])),
+            (
+                AccountId::new(2_001),
+                Node::from_leaf(account_leaf([2_001, 2_501])),
+            ),
+            [(
+                AccountId::new(3_001),
+                Node::from_leaf(account_leaf([3_001, 3_501])),
+            )],
+        );
+
+        let result = root.remove(&AccountId::new(2_001));
+
+        assert!(matches!(
+            result,
+            RemoveResult::Removed {
+                occupancy: OccupancyChange::Stable { .. },
+                ..
+            }
+        ));
+        assert_eq!(
+            root,
+            Node::from_sorted_branch(
+                Node::from_leaf(account_leaf([1_001, 1_501, 2_501])),
+                (
+                    AccountId::new(3_001),
+                    Node::from_leaf(account_leaf([3_001, 3_501])),
+                ),
+                [],
+            )
+        );
+    }
+
+    #[test]
+    fn rebalance_leaf_merges_right_sibling() {
+        let mut root: AccountNode = Node::from_sorted_branch(
+            Node::from_leaf(account_leaf([1_001, 1_501])),
+            (
+                AccountId::new(2_001),
+                Node::from_leaf(account_leaf([2_001, 2_501])),
+            ),
+            [(
+                AccountId::new(3_001),
+                Node::from_leaf(account_leaf([3_001, 3_501])),
+            )],
+        );
+
+        let result = root.remove(&AccountId::new(1_001));
+
+        assert!(matches!(
+            result,
+            RemoveResult::Removed {
+                occupancy: OccupancyChange::Stable { .. },
+                ..
+            }
+        ));
+        assert_eq!(
+            root,
+            Node::from_sorted_branch(
+                Node::from_leaf(account_leaf([1_501, 2_001, 2_501])),
+                (
+                    AccountId::new(3_001),
+                    Node::from_leaf(account_leaf([3_001, 3_501])),
+                ),
+                [],
+            )
+        );
+    }
+
+    #[test]
+    fn rebalance_branch_borrows_from_left_sibling() {
+        let mut left = account_branch_node([[1_001, 1_501], [2_001, 2_501], [3_001, 3_501]]);
+        let mut right = underfull_account_branch([4_001, 4_501]);
+        let mut separator = AccountId::new(4_001);
+
+        Node::borrow_from_left(&mut left, &mut separator, &mut right);
+
+        assert_eq!(separator, AccountId::new(3_001));
+        assert_eq!(left, account_branch_node([[1_001, 1_501], [2_001, 2_501]]));
+        assert_eq!(right, account_branch_node([[3_001, 3_501], [4_001, 4_501]]));
+    }
+
+    #[test]
+    fn rebalance_branch_borrows_from_right_sibling() {
+        let mut left = underfull_account_branch([1_001, 1_501]);
+        let mut right = account_branch_node([[2_001, 2_501], [3_001, 3_501], [4_001, 4_501]]);
+        let mut separator = AccountId::new(2_001);
+
+        Node::borrow_from_right(&mut left, &mut separator, &mut right);
+
+        assert_eq!(separator, AccountId::new(3_001));
+        assert_eq!(left, account_branch_node([[1_001, 1_501], [2_001, 2_501]]));
+        assert_eq!(right, account_branch_node([[3_001, 3_501], [4_001, 4_501]]));
+    }
+
+    #[test]
+    fn rebalance_branch_merge_joins_parent_separator() {
+        let mut left = account_branch_node([[1_001, 1_501], [2_001, 2_501]]);
+        let right = account_branch_node([[3_001, 3_501], [4_001, 4_501]]);
+
+        left.merge_right(AccountId::new(3_001), right);
+
+        assert_eq!(
+            left,
+            account_branch_node([
+                [1_001, 1_501],
+                [2_001, 2_501],
+                [3_001, 3_501],
+                [4_001, 4_501],
+            ])
+        );
+    }
+
+    #[test]
+    fn rebalance_branch_applies_changed_minimum_before_borrowing() {
+        let mut root = BranchNode::from_sorted_parts(
+            account_branch_node([[1_001, 1_501], [2_001, 2_501], [3_001, 3_501]]),
+            (
+                AccountId::new(4_001),
+                underfull_account_branch([4_501, 4_751]),
+            ),
+            [],
+        );
+
+        root.absorb_child_removal(
+            super::ChildIndex::new(1),
+            OccupancyChange::Underflow {
+                minimum: MinimumChange::Changed(AccountId::new(4_501)),
+            },
+        );
+
+        assert_eq!(
+            Node::from_branch(root),
+            Node::from_sorted_branch(
+                account_branch_node([[1_001, 1_501], [2_001, 2_501]]),
+                (
+                    AccountId::new(3_001),
+                    account_branch_node([[3_001, 3_501], [4_501, 4_751]]),
+                ),
+                [],
+            )
         );
     }
 }

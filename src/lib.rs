@@ -34,3 +34,4 @@ pub use iter::Range;
 pub use iter::RangeError;
 pub use tree::BTree;
 pub use tree::InsertOutcome;
+pub use tree::RemoveOutcome;

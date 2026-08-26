@@ -21,6 +21,19 @@ pub enum InsertOutcome<V> {
     },
 }
 
+/// Public result of removing a key-value pair.
+#[derive(Debug, PartialEq, Eq)]
+#[must_use = "removal reports whether the key existed"]
+pub enum RemoveOutcome<V> {
+    /// The key existed and its value was removed.
+    Removed {
+        /// Value previously associated with the key.
+        value: V,
+    },
+    /// The key was not present.
+    Missing,
+}
+
 /// Number of entries stored by a tree.
 #[derive(Clone, Copy)]
 struct EntryCount(usize);
@@ -40,6 +53,10 @@ impl EntryCount {
 
     fn increment(&mut self) {
         self.0 += 1;
+    }
+
+    fn decrement(&mut self) {
+        self.0 -= 1;
     }
 }
 
@@ -103,6 +120,19 @@ impl<K, V, const CAPACITY: usize> Root<K, V, CAPACITY> {
 impl<K: Ord + Clone, V, const CAPACITY: usize> Root<K, V, CAPACITY> {
     fn insert(&mut self, key: K, value: V) -> InsertResult<K, V, CAPACITY> {
         self.node.insert(key, value)
+    }
+
+    fn remove<Q>(&mut self, key: &Q) -> crate::node::RemoveResult<K, V>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        let result = self.node.remove(key);
+        match &result {
+            crate::node::RemoveResult::Missing => {}
+            crate::node::RemoveResult::Removed { .. } => self.node.normalize_root(),
+        }
+        result
     }
 }
 
@@ -212,6 +242,24 @@ impl<K: Ord + Clone, V, const CAPACITY: usize> BTree<K, V, CAPACITY> {
             }
         }
     }
+
+    /// Removes a key and returns its value when present.
+    pub fn remove<Q>(&mut self, key: &Q) -> RemoveOutcome<V>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        match self.root.remove(key) {
+            crate::node::RemoveResult::Missing => RemoveOutcome::Missing,
+            crate::node::RemoveResult::Removed {
+                value,
+                occupancy: _occupancy,
+            } => {
+                self.length.decrement();
+                RemoveOutcome::Removed { value }
+            }
+        }
+    }
 }
 
 impl<K, V, const CAPACITY: usize> Default for BTree<K, V, CAPACITY> {
@@ -234,7 +282,7 @@ impl<K, V, const CAPACITY: usize> BTree<K, V, CAPACITY> {
 
     fn assert_valid(&self)
     where
-        K: Ord,
+        K: Ord + std::fmt::Debug,
     {
         let counted_entries = self.root.node.assert_valid_root();
         assert_eq!(counted_entries, self.length.get());
@@ -243,8 +291,11 @@ impl<K, V, const CAPACITY: usize> BTree<K, V, CAPACITY> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap as StandardBTreeMap;
+
     use super::BTree;
     use super::InsertOutcome;
+    use super::RemoveOutcome;
     use crate::node::Node;
 
     type AccountBalances = BTree<String, u64, 3>;
@@ -280,6 +331,17 @@ mod tests {
         ))
     }
 
+    fn account_balances(account_ids: impl IntoIterator<Item = u64>) -> AccountBalances {
+        let mut balances = AccountBalances::new();
+        account_ids.into_iter().for_each(|account_id| {
+            assert_eq!(
+                balances.insert(format!("account-2026-{account_id}"), account_id * 10),
+                InsertOutcome::Inserted
+            );
+        });
+        balances
+    }
+
     fn insert_accounts_and_validate(account_ids: impl IntoIterator<Item = u64>) {
         let mut balances = AccountBalances::new();
         let mut inserted_accounts = Vec::new();
@@ -298,6 +360,44 @@ mod tests {
                 .for_each(|(inserted_key, balance)| {
                     assert_eq!(balances.get(inserted_key), Some(balance));
                 });
+        });
+    }
+
+    fn remove_accounts_and_validate(account_ids: impl IntoIterator<Item = u64>) {
+        let mut balances = AccountBalances::new();
+        let mut retained = (1_001_u64..=1_064).collect::<Vec<_>>();
+        retained.iter().for_each(|account_id| {
+            assert_eq!(
+                balances.insert(format!("account-2026-{account_id}"), account_id * 10),
+                InsertOutcome::Inserted
+            );
+        });
+
+        account_ids.into_iter().for_each(|account_id| {
+            let outcome = balances.remove(format!("account-2026-{account_id}").as_str());
+            let retained_index = retained
+                .binary_search(&account_id)
+                .expect("removal order must contain each inserted account exactly once");
+            retained.remove(retained_index);
+
+            assert_eq!(
+                outcome,
+                RemoveOutcome::Removed {
+                    value: account_id * 10
+                }
+            );
+            balances.assert_valid();
+            assert_eq!(balances.len(), retained.len());
+            assert_eq!(
+                balances
+                    .iter()
+                    .map(|(key, _value)| key.as_str())
+                    .collect::<Vec<_>>(),
+                retained
+                    .iter()
+                    .map(|retained_id| format!("account-2026-{retained_id}"))
+                    .collect::<Vec<_>>()
+            );
         });
     }
 
@@ -541,5 +641,167 @@ mod tests {
         let account_ids = (0_u64..32).flat_map(|offset| [1_001 + offset, 1_064 - offset]);
 
         insert_accounts_and_validate(account_ids);
+    }
+
+    #[test]
+    fn remove_missing_account_preserves_tree() {
+        let mut balances = leaf_balances();
+
+        let outcome = balances.remove("account-2026-2501");
+
+        assert_eq!(outcome, RemoveOutcome::Missing);
+        assert_eq!(balances.len(), 3);
+        assert_eq!(balances.get("account-2026-2001"), Some(&25_000));
+        balances.assert_valid();
+    }
+
+    #[test]
+    fn remove_from_occupied_root_leaf_returns_value() {
+        let mut balances = leaf_balances();
+
+        let outcome = balances.remove("account-2026-2001");
+
+        assert_eq!(outcome, RemoveOutcome::Removed { value: 25_000 });
+        assert_eq!(balances.len(), 2);
+        assert!(!balances.contains_key("account-2026-2001"));
+        balances.assert_valid();
+    }
+
+    #[test]
+    fn remove_with_str_finds_owned_string_key() {
+        let mut balances = leaf_balances();
+        let borrowed_account_id: &str = "account-2026-3001";
+
+        let outcome = balances.remove(borrowed_account_id);
+
+        assert_eq!(outcome, RemoveOutcome::Removed { value: 37_500 });
+        assert_eq!(
+            balances.last_key_value().map(|(key, _value)| key.as_str()),
+            Some("account-2026-2001")
+        );
+    }
+
+    #[test]
+    fn remove_last_account_restores_empty_root() {
+        let mut balances = AccountBalances::new();
+        let inserted = balances.insert(String::from("account-2026-1001"), 12_500);
+
+        let outcome = balances.remove("account-2026-1001");
+
+        assert_eq!(inserted, InsertOutcome::Inserted);
+        assert_eq!(outcome, RemoveOutcome::Removed { value: 12_500 });
+        assert!(balances.is_empty());
+        assert!(balances.root.is_empty_leaf());
+        balances.assert_valid();
+    }
+
+    #[test]
+    fn single_child_root_collapses_one_level() {
+        let mut balances = account_balances([1_001, 2_001, 3_001, 4_001]);
+        assert_eq!(balances.root.height(), 1);
+
+        let outcome = balances.remove("account-2026-4001");
+
+        assert_eq!(outcome, RemoveOutcome::Removed { value: 40_010 });
+        assert_eq!(balances.root.height(), 0);
+        assert_eq!(balances.len(), 3);
+        balances.assert_valid();
+    }
+
+    #[test]
+    fn remove_new_minimum_refreshes_ancestor_routing() {
+        let mut balances = account_balances(1_001..=1_032);
+
+        let outcome = balances.remove("account-2026-1001");
+
+        assert_eq!(outcome, RemoveOutcome::Removed { value: 10_010 });
+        assert_eq!(
+            balances.first_key_value().map(|(key, _value)| key.as_str()),
+            Some("account-2026-1002")
+        );
+        assert_eq!(balances.get("account-2026-1002"), Some(&10_020));
+        balances.assert_valid();
+    }
+
+    #[test]
+    fn ascending_removals_preserve_tree_invariants() {
+        remove_accounts_and_validate(1_001_u64..=1_064);
+    }
+
+    #[test]
+    fn descending_removals_preserve_tree_invariants() {
+        remove_accounts_and_validate((1_001_u64..=1_064).rev());
+    }
+
+    #[test]
+    fn interleaved_removals_preserve_tree_invariants() {
+        let account_ids = (0_u64..32).flat_map(|offset| [1_001 + offset, 1_064 - offset]);
+
+        remove_accounts_and_validate(account_ids);
+    }
+
+    #[test]
+    fn even_capacity_removals_preserve_tree_invariants() {
+        let mut balances = BTree::<String, u64, 4>::new();
+        (1_001_u64..=1_096).for_each(|account_id| {
+            assert_eq!(
+                balances.insert(format!("account-2026-{account_id}"), account_id * 10),
+                InsertOutcome::Inserted
+            );
+        });
+        let removal_order = (0_u64..48).flat_map(|offset| [1_001 + offset, 1_096 - offset]);
+
+        removal_order.for_each(|account_id| {
+            assert_eq!(
+                balances.remove(format!("account-2026-{account_id}").as_str()),
+                RemoveOutcome::Removed {
+                    value: account_id * 10
+                }
+            );
+            balances.assert_valid();
+        });
+
+        assert!(balances.is_empty());
+        assert!(balances.root.is_empty_leaf());
+    }
+
+    #[test]
+    fn mixed_mutations_match_standard_btree_map() {
+        let mut balances = AccountBalances::new();
+        let mut expected = StandardBTreeMap::new();
+
+        (0_u64..256).for_each(|sequence| {
+            let account_id = 1_001 + (sequence * 37) % 97;
+            let key = format!("account-2026-{account_id}");
+            let balance = account_id * 10 + sequence;
+
+            match sequence % 3 {
+                0 | 1 => {
+                    let actual = balances.insert(key.clone(), balance);
+                    let standard = expected.insert(key.clone(), balance);
+                    match standard {
+                        Some(previous) => {
+                            assert_eq!(actual, InsertOutcome::Replaced { previous });
+                        }
+                        None => assert_eq!(actual, InsertOutcome::Inserted),
+                    }
+                }
+                2 => {
+                    let actual = balances.remove(key.as_str());
+                    let standard = expected.remove(key.as_str());
+                    match standard {
+                        Some(value) => {
+                            assert_eq!(actual, RemoveOutcome::Removed { value });
+                        }
+                        None => assert_eq!(actual, RemoveOutcome::Missing),
+                    }
+                }
+                _unreachable_remainder => unreachable!("remainder modulo three is at most two"),
+            }
+
+            balances.assert_valid();
+            assert_eq!(balances.len(), expected.len());
+            assert!(balances.iter().eq(expected.iter()));
+        });
     }
 }

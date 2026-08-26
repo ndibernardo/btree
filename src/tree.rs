@@ -165,6 +165,12 @@ impl<K, V, const CAPACITY: usize> BTree<K, V, CAPACITY> {
     pub const fn is_empty(&self) -> bool {
         self.length.is_empty()
     }
+
+    /// Removes all entries and restores the canonical empty root.
+    pub fn clear(&mut self) {
+        self.root = Root::empty();
+        self.length = EntryCount::empty();
+    }
 }
 
 impl<K: Ord, V, const CAPACITY: usize> BTree<K, V, CAPACITY> {
@@ -335,6 +341,7 @@ mod tests {
         Lookup {
             account_id: GeneratedAccountId,
         },
+        Clear,
     }
 
     fn generated_account_id() -> impl Strategy<Value = GeneratedAccountId> {
@@ -359,6 +366,7 @@ mod tests {
             2 => generated_account_id().prop_map(|account_id| MapOperation::Lookup {
                 account_id,
             }),
+            1 => Just(MapOperation::Clear),
         ]
     }
 
@@ -417,6 +425,10 @@ mod tests {
                         actual.contains_key(&account_id),
                         expected.contains_key(&account_id)
                     );
+                }
+                MapOperation::Clear => {
+                    actual.clear();
+                    expected.clear();
                 }
             }
 
@@ -596,6 +608,35 @@ mod tests {
         assert_eq!(default_balances.is_empty(), new_balances.is_empty());
         assert!(default_balances.root.is_empty_leaf());
         assert!(new_balances.root.is_empty_leaf());
+    }
+
+    #[test]
+    fn clear_on_empty_tree_preserves_empty_root() {
+        let mut balances = AccountBalances::new();
+
+        balances.clear();
+
+        assert!(balances.is_empty());
+        assert_eq!(balances.len(), 0);
+        assert!(balances.root.is_empty_leaf());
+        assert_eq!(balances.root.allocated_entry_capacity(), 0);
+        balances.assert_valid();
+    }
+
+    #[test]
+    fn clear_on_populated_tree_restores_empty_root() {
+        let mut balances = account_balances(1_001..=1_064);
+
+        balances.clear();
+
+        assert!(balances.is_empty());
+        assert_eq!(balances.len(), 0);
+        assert_eq!(balances.first_key_value(), None);
+        assert_eq!(balances.last_key_value(), None);
+        assert_eq!(balances.iter().next(), None);
+        assert!(balances.root.is_empty_leaf());
+        assert_eq!(balances.root.allocated_entry_capacity(), 0);
+        balances.assert_valid();
     }
 
     #[test]

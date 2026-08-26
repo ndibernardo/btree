@@ -6,15 +6,15 @@ An ordered in-memory map implemented as a B+-tree in Rust.
 
 This library stores key-value pairs in sorted order. Values live only in leaf
 nodes; branch nodes contain routing separators. The tree supports borrowed-key
-lookup, mutable lookup, insertion, removal, double-ended iteration, and bounded
-ranges.
+lookup, mutable lookup, insertion, removal, clearing, double-ended iteration, and
+bounded ranges.
 
 Node capacity is part of the tree's type. It defaults to 32 and can be selected
 with the `CAPACITY` const generic. The crate has no runtime dependencies.
 
 ## Usage
 
-Insert balances, query a bounded range, and remove an entry:
+Insert balances, query a bounded range, remove an entry, and clear the tree:
 
 ```rust
 use std::ops::Bound;
@@ -56,6 +56,9 @@ assert_eq!(
     balances.remove("account-2026-1001"),
     RemoveOutcome::Removed { value: 12_500 },
 );
+
+balances.clear();
+assert!(balances.is_empty());
 ```
 
 Insertion reports whether it added a key or replaced an existing value. Removal

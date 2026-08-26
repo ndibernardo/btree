@@ -1,6 +1,8 @@
 use std::borrow::Borrow;
 
-use crate::node::{InsertResult, Node, NodeCapacity};
+use crate::node::InsertResult;
+use crate::node::Node;
+use crate::node::NodeCapacity;
 
 /// Public result of inserting a key-value pair.
 #[derive(Debug, PartialEq, Eq)]
@@ -217,7 +219,8 @@ impl<K, V, const CAPACITY: usize> BTree<K, V, CAPACITY> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BTree, InsertOutcome};
+    use super::BTree;
+    use super::InsertOutcome;
     use crate::node::Node;
 
     type AccountBalances = BTree<String, u64, 3>;

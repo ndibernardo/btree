@@ -28,4 +28,5 @@
 mod node;
 mod tree;
 
-pub use tree::{BTree, InsertOutcome};
+pub use tree::BTree;
+pub use tree::InsertOutcome;

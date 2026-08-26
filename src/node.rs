@@ -712,7 +712,11 @@ impl<K, V> Entry<K, V> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BranchNode, InsertResult, LeafNode, Node, SearchSlot};
+    use super::BranchNode;
+    use super::InsertResult;
+    use super::LeafNode;
+    use super::Node;
+    use super::SearchSlot;
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
     struct AccountId(u64);

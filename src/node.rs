@@ -1,3 +1,16 @@
+//! B+-tree representation and structural mutation.
+//!
+//! Values are owned only by leaves. A branch owns its leftmost child separately;
+//! every later child is paired with a separator equal to that child's minimum
+//! key. Stable leaves contain at most `CAPACITY` entries, stable branches contain
+//! at most `CAPACITY` separator-child edges, and all leaves have the same depth.
+//!
+//! Insertion may create one overflow slot before a split. Removal may create an
+//! underfull node or a one-child branch while typed outcomes propagate upward;
+//! root normalization restores the stable representation before the public
+//! operation returns. Keys are cloned only when the minimum key duplicated by a
+//! branch separator must be created or refreshed.
+
 use std::borrow::Borrow;
 use std::cmp::Ordering;
 

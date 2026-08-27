@@ -1,4 +1,5 @@
 use std::borrow::Borrow;
+use std::iter::FromIterator;
 use std::ops::RangeBounds;
 
 use crate::iter::Iter;
@@ -271,6 +272,31 @@ impl<K: Ord + Clone, V, const CAPACITY: usize> BTree<K, V, CAPACITY> {
 impl<K, V, const CAPACITY: usize> Default for BTree<K, V, CAPACITY> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<'tree, K: Ord, V, const CAPACITY: usize> IntoIterator for &'tree BTree<K, V, CAPACITY> {
+    type Item = (&'tree K, &'tree V);
+    type IntoIter = Iter<'tree, K, V, CAPACITY>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<K: Ord + Clone, V, const CAPACITY: usize> Extend<(K, V)> for BTree<K, V, CAPACITY> {
+    fn extend<T: IntoIterator<Item = (K, V)>>(&mut self, entries: T) {
+        entries.into_iter().for_each(|(key, value)| {
+            let _outcome = self.insert(key, value);
+        });
+    }
+}
+
+impl<K: Ord + Clone, V, const CAPACITY: usize> FromIterator<(K, V)> for BTree<K, V, CAPACITY> {
+    fn from_iter<T: IntoIterator<Item = (K, V)>>(entries: T) -> Self {
+        let mut tree = Self::new();
+        tree.extend(entries);
+        tree
     }
 }
 
@@ -637,6 +663,102 @@ mod tests {
         assert!(balances.root.is_empty_leaf());
         assert_eq!(balances.root.allocated_entry_capacity(), 0);
         balances.assert_valid();
+    }
+
+    #[test]
+    fn extend_adds_new_account_balances() {
+        let mut balances = account_balances([1_001]);
+
+        balances.extend([
+            (String::from("account-2026-3001"), 37_500),
+            (String::from("account-2026-2001"), 25_000),
+        ]);
+
+        assert_eq!(balances.len(), 3);
+        assert_eq!(
+            balances
+                .iter()
+                .map(|(account_id, balance)| (account_id.as_str(), *balance))
+                .collect::<Vec<_>>(),
+            [
+                ("account-2026-1001", 10_010),
+                ("account-2026-2001", 25_000),
+                ("account-2026-3001", 37_500),
+            ]
+        );
+        balances.assert_valid();
+    }
+
+    #[test]
+    fn extend_duplicate_account_keeps_last_balance() {
+        let mut balances = account_balances([1_001]);
+
+        balances.extend([
+            (String::from("account-2026-1001"), 12_500),
+            (String::from("account-2026-1001"), 15_000),
+        ]);
+
+        assert_eq!(balances.len(), 1);
+        assert_eq!(balances.get("account-2026-1001"), Some(&15_000));
+        balances.assert_valid();
+    }
+
+    #[test]
+    fn from_iter_builds_ordered_account_map() {
+        let balances: AccountBalances = [
+            (String::from("account-2026-3001"), 37_500),
+            (String::from("account-2026-1001"), 12_500),
+            (String::from("account-2026-2001"), 25_000),
+        ]
+        .into_iter()
+        .collect();
+
+        assert_eq!(
+            balances
+                .iter()
+                .map(|(account_id, balance)| (account_id.as_str(), *balance))
+                .collect::<Vec<_>>(),
+            [
+                ("account-2026-1001", 12_500),
+                ("account-2026-2001", 25_000),
+                ("account-2026-3001", 37_500),
+            ]
+        );
+        balances.assert_valid();
+    }
+
+    #[test]
+    fn from_iter_duplicate_account_keeps_last_balance() {
+        let balances: AccountBalances = [
+            (String::from("account-2026-1001"), 12_500),
+            (String::from("account-2026-1001"), 15_000),
+        ]
+        .into_iter()
+        .collect();
+
+        assert_eq!(balances.len(), 1);
+        assert_eq!(balances.get("account-2026-1001"), Some(&15_000));
+        balances.assert_valid();
+    }
+
+    #[test]
+    fn shared_into_iter_yields_borrowed_entries() {
+        let balances = account_balances([3_001, 1_001, 2_001]);
+
+        let entries = (&balances)
+            .into_iter()
+            .map(|(account_id, balance)| (account_id.as_str(), *balance))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            entries,
+            [
+                ("account-2026-1001", 10_010),
+                ("account-2026-2001", 20_010),
+                ("account-2026-3001", 30_010),
+            ]
+        );
+        assert_eq!(balances.get("account-2026-2001"), Some(&20_010));
     }
 
     #[test]

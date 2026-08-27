@@ -64,6 +64,44 @@ assert!(balances.is_empty());
 Insertion reports whether it added a key or replaced an existing value. Removal
 reports the removed value or `RemoveOutcome::Missing`.
 
+## Building from iterators
+
+`BTree` implements `FromIterator` and `Extend`, while `&BTree` implements
+`IntoIterator` over borrowed entries. Entries are processed in iterator order, so
+the last value for a duplicate key wins:
+
+```rust
+use btree::BTree;
+
+let mut balances: BTree<String, u64, 3> = [
+    (String::from("account-2026-2001"), 25_000),
+    (String::from("account-2026-1001"), 12_500),
+]
+.into_iter()
+.collect();
+
+balances.extend([
+    (String::from("account-2026-1001"), 15_000),
+    (String::from("account-2026-3001"), 37_500),
+]);
+
+assert_eq!(balances.len(), 3);
+assert_eq!(balances.get("account-2026-1001"), Some(&15_000));
+
+let ordered_account_ids = (&balances)
+    .into_iter()
+    .map(|(account_id, _balance)| account_id.as_str())
+    .collect::<Vec<_>>();
+assert_eq!(
+    ordered_account_ids,
+    [
+        "account-2026-1001",
+        "account-2026-2001",
+        "account-2026-3001",
+    ]
+);
+```
+
 ## Range behavior
 
 `BTree::range` validates its bounds and returns a `Result`:

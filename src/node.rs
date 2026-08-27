@@ -1999,6 +1999,30 @@ mod tests {
     }
 
     #[test]
+    fn rebalance_branch_merges_right_sibling() {
+        let mut root = BranchNode::from_sorted_parts(
+            underfull_account_branch([1_001, 1_501]),
+            (
+                AccountId::new(2_001),
+                account_branch_node([[2_001, 2_501], [3_001, 3_501]]),
+            ),
+            [],
+        );
+
+        root.absorb_child_removal(
+            super::ChildIndex::new(0),
+            OccupancyChange::Underflow {
+                minimum: MinimumChange::Unchanged,
+            },
+        );
+        let expected_merged_branch =
+            account_branch_node([[1_001, 1_501], [2_001, 2_501], [3_001, 3_501]]);
+
+        assert_eq!(root.leftmost.as_ref(), &expected_merged_branch);
+        assert!(root.rightward.is_empty());
+    }
+
+    #[test]
     fn rebalance_branch_applies_changed_minimum_before_borrowing() {
         let mut root = BranchNode::from_sorted_parts(
             account_branch_node([[1_001, 1_501], [2_001, 2_501], [3_001, 3_501]]),

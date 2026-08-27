@@ -4,6 +4,7 @@ mod iter;
 mod node;
 mod tree;
 
+pub use iter::IntoIter;
 pub use iter::Iter;
 pub use iter::Range;
 pub use iter::RangeError;

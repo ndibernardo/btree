@@ -106,6 +106,14 @@ impl<K, V, const CAPACITY: usize> Node<K, V, CAPACITY> {
         Self::Branch(BranchNode::from_root_split(left, separator, right))
     }
 
+    /// Moves leaf entries into one ordered buffer, discarding branch separators.
+    pub(crate) fn append_owned_entries(self, entries: &mut Vec<(K, V)>) {
+        match self {
+            Self::Leaf(leaf) => leaf.append_owned_entries(entries),
+            Self::Branch(branch) => branch.append_owned_entries(entries),
+        }
+    }
+
     /// Returns the first leaf entry, if present.
     pub(crate) fn first_key_value(&self) -> Option<(&K, &V)> {
         match self {
@@ -416,6 +424,10 @@ impl<K, V, const CAPACITY: usize> LeafNode<K, V, CAPACITY> {
         self.entries.last().map(Entry::as_pair)
     }
 
+    fn append_owned_entries(self, entries: &mut Vec<(K, V)>) {
+        entries.extend(self.entries.into_iter().map(Entry::into_pair));
+    }
+
     /// Returns the entry at a cursor position.
     pub(crate) fn entry_at(&self, index: usize) -> Option<(&K, &V)> {
         self.entries.get(index).map(Entry::as_pair)
@@ -583,6 +595,13 @@ impl<K, V, const CAPACITY: usize> BranchNode<K, V, CAPACITY> {
 
     fn last_key_value(&self) -> Option<(&K, &V)> {
         self.rightmost_child().last_key_value()
+    }
+
+    fn append_owned_entries(self, entries: &mut Vec<(K, V)>) {
+        self.leftmost.append_owned_entries(entries);
+        self.rightward
+            .into_iter()
+            .for_each(|edge| edge.child.append_owned_entries(entries));
     }
 
     fn rightmost_child(&self) -> &Node<K, V, CAPACITY> {
@@ -1050,6 +1069,10 @@ impl<K, V> Entry<K, V> {
 
     fn as_pair(&self) -> (&K, &V) {
         (&self.key, &self.value)
+    }
+
+    fn into_pair(self) -> (K, V) {
+        (self.key, self.value)
     }
 }
 

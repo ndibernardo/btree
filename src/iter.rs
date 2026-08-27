@@ -12,6 +12,33 @@ use crate::node::SearchSlot;
 
 type Item<'a, K, V> = (&'a K, &'a V);
 
+/// Owning iterator over a consumed tree's entries in key order.
+pub struct IntoIter<K, V> {
+    entries: std::vec::IntoIter<(K, V)>,
+}
+
+impl<K, V> IntoIter<K, V> {
+    pub(crate) fn new<const CAPACITY: usize>(root: Node<K, V, CAPACITY>, length: usize) -> Self {
+        let mut entries = Vec::with_capacity(length);
+        root.append_owned_entries(&mut entries);
+        Self {
+            entries: entries.into_iter(),
+        }
+    }
+}
+
+impl<K, V> Iterator for IntoIter<K, V> {
+    type Item = (K, V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.entries.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.entries.size_hint()
+    }
+}
+
 /// Error returned when range bounds cannot describe an ordered interval.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RangeError {

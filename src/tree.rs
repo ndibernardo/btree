@@ -2,6 +2,7 @@ use std::borrow::Borrow;
 use std::iter::FromIterator;
 use std::ops::RangeBounds;
 
+use crate::iter::IntoIter;
 use crate::iter::Iter;
 use crate::iter::Range;
 use crate::iter::RangeError;
@@ -281,6 +282,15 @@ impl<'tree, K: Ord, V, const CAPACITY: usize> IntoIterator for &'tree BTree<K, V
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
+    }
+}
+
+impl<K, V, const CAPACITY: usize> IntoIterator for BTree<K, V, CAPACITY> {
+    type Item = (K, V);
+    type IntoIter = IntoIter<K, V>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        IntoIter::new(self.root.node, self.length.get())
     }
 }
 
@@ -759,6 +769,23 @@ mod tests {
             ]
         );
         assert_eq!(balances.get("account-2026-2001"), Some(&20_010));
+    }
+
+    #[test]
+    fn owned_into_iter_yields_owned_entries() {
+        let balances = account_balances([3_001, 1_001, 4_001, 2_001]);
+
+        let entries = balances.into_iter().collect::<Vec<_>>();
+
+        assert_eq!(
+            entries,
+            [
+                (String::from("account-2026-1001"), 10_010),
+                (String::from("account-2026-2001"), 20_010),
+                (String::from("account-2026-3001"), 30_010),
+                (String::from("account-2026-4001"), 40_010),
+            ]
+        );
     }
 
     #[test]

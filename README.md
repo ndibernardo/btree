@@ -66,9 +66,9 @@ reports the removed value or `RemoveOutcome::Missing`.
 
 ## Building from iterators
 
-`BTree` implements `FromIterator` and `Extend`, while `&BTree` implements
-`IntoIterator` over borrowed entries. Entries are processed in iterator order, so
-the last value for a duplicate key wins:
+`BTree` implements `FromIterator`, `Extend`, and consuming `IntoIterator`, while
+`&BTree` implements `IntoIterator` over borrowed entries. Entries are processed in
+iterator order, so the last value for a duplicate key wins:
 
 ```rust
 use btree::BTree;
@@ -98,6 +98,16 @@ assert_eq!(
         "account-2026-1001",
         "account-2026-2001",
         "account-2026-3001",
+    ]
+);
+
+let owned_entries = balances.into_iter().collect::<Vec<_>>();
+assert_eq!(
+    owned_entries,
+    [
+        (String::from("account-2026-1001"), 15_000),
+        (String::from("account-2026-2001"), 25_000),
+        (String::from("account-2026-3001"), 37_500),
     ]
 );
 ```

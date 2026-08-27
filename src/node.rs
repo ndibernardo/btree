@@ -1919,6 +1919,34 @@ mod tests {
     }
 
     #[test]
+    fn stable_parent_stops_underflow_propagation() {
+        let mut parent = Node::from_branch(account_branch());
+
+        let result = parent.remove(&AccountId::new(2_001));
+
+        assert_eq!(
+            result,
+            RemoveResult::Removed {
+                value: BalanceCents::new(20_010),
+                occupancy: OccupancyChange::Stable {
+                    minimum: MinimumChange::Unchanged,
+                },
+            }
+        );
+        assert_eq!(
+            parent,
+            Node::from_sorted_branch(
+                Node::from_leaf(account_leaf([1_001, 1_501, 2_501])),
+                (
+                    AccountId::new(3_001),
+                    Node::from_leaf(account_leaf([3_001, 3_501])),
+                ),
+                [],
+            )
+        );
+    }
+
+    #[test]
     fn rebalance_leaf_merges_right_sibling() {
         let mut root: AccountNode = Node::from_sorted_branch(
             Node::from_leaf(account_leaf([1_001, 1_501])),

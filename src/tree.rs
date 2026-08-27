@@ -1,5 +1,6 @@
 use std::borrow::Borrow;
 use std::iter::FromIterator;
+use std::iter::FusedIterator;
 use std::ops::RangeBounds;
 
 use crate::iter::IntoIter;
@@ -216,6 +217,20 @@ impl<K: Ord, V, const CAPACITY: usize> BTree<K, V, CAPACITY> {
     /// Returns an immutable iterator over all entries in key order.
     pub fn iter(&self) -> Iter<'_, K, V, CAPACITY> {
         Iter::new(&self.root.node, self.length.get())
+    }
+
+    /// Returns an iterator over keys in ascending order.
+    pub fn keys(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = &K> + ExactSizeIterator + FusedIterator + '_ {
+        self.iter().map(|(key, _value)| key)
+    }
+
+    /// Returns an iterator over values in ascending key order.
+    pub fn values(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = &V> + ExactSizeIterator + FusedIterator + '_ {
+        self.iter().map(|(_key, value)| value)
     }
 
     /// Returns an immutable iterator over entries within the given bounds.
@@ -930,6 +945,35 @@ mod tests {
             ]
         );
         assert_eq!(balances.get("account-2026-2001"), Some(&20_010));
+    }
+
+    #[test]
+    fn keys_follow_tree_order_and_report_exact_length() {
+        let balances = account_balances([3_001, 1_001, 2_001]);
+        let mut keys = balances.keys();
+
+        assert_eq!(keys.len(), 3);
+        assert_eq!(keys.next().map(String::as_str), Some("account-2026-1001"));
+        assert_eq!(
+            keys.next_back().map(String::as_str),
+            Some("account-2026-3001")
+        );
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys.next().map(String::as_str), Some("account-2026-2001"));
+        assert_eq!(keys.next(), None);
+    }
+
+    #[test]
+    fn values_follow_key_order_and_report_exact_length() {
+        let balances = account_balances([3_001, 1_001, 2_001]);
+        let mut values = balances.values();
+
+        assert_eq!(values.len(), 3);
+        assert_eq!(values.next(), Some(&10_010));
+        assert_eq!(values.next_back(), Some(&30_010));
+        assert_eq!(values.len(), 1);
+        assert_eq!(values.next(), Some(&20_010));
+        assert_eq!(values.next(), None);
     }
 
     #[test]

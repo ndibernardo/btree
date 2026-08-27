@@ -7,8 +7,9 @@ An ordered in-memory map implemented as a B+-tree in Rust.
 This library stores key-value pairs in sorted order. Values live only in leaf
 nodes; branch nodes contain routing separators. The tree supports borrowed-key
 lookup, mutable lookup, insertion, removal, clearing, double-ended iteration, and
-bounded ranges. The least or greatest entry can be removed directly, and entries
-can be retained with a predicate that may update their values.
+bounded ranges. Keys and values can be projected independently in key order. The
+least or greatest entry can be removed directly, and entries can be retained with
+a predicate that may update their values.
 
 Node capacity is part of the tree's type. It defaults to 32 and can be selected
 with the `CAPACITY` const generic. The crate has no runtime dependencies.
@@ -76,8 +77,9 @@ removes rejected entries.
 
 `BTree` implements `FromIterator`, `Extend`, consuming `IntoIterator`, and
 ordered map-style `Debug`, while `&BTree` implements `IntoIterator` over borrowed
-entries. Entries are processed in iterator order, so the last value for a
-duplicate key wins:
+entries. The `keys` and `values` methods expose ordered, double-ended projections
+with exact lengths. Entries are processed in iterator order, so the last value
+for a duplicate key wins:
 
 ```rust
 use btree::BTree;

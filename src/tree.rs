@@ -292,6 +292,28 @@ impl<K: Ord + Clone, V, const CAPACITY: usize> BTree<K, V, CAPACITY> {
             }
         }
     }
+
+    /// Retains entries accepted by the predicate, visiting keys in ascending order.
+    pub fn retain<F>(&mut self, mut predicate: F)
+    where
+        F: FnMut(&K, &mut V) -> bool,
+    {
+        let keys = self
+            .iter()
+            .map(|(key, _value)| key.clone())
+            .collect::<Vec<_>>();
+
+        keys.into_iter().for_each(|key| {
+            let keep = match self.get_mut(&key) {
+                Some(value) => predicate(&key, value),
+                None => unreachable!("a retained key remains present until it is visited"),
+            };
+
+            if !keep {
+                let _outcome = self.remove(&key);
+            }
+        });
+    }
 }
 
 impl<K, V, const CAPACITY: usize> Default for BTree<K, V, CAPACITY> {
@@ -767,6 +789,50 @@ mod tests {
         assert_eq!(balances.iter().next(), None);
         assert!(balances.root.is_empty_leaf());
         assert_eq!(balances.root.allocated_entry_capacity(), 0);
+        balances.assert_valid();
+    }
+
+    #[test]
+    fn retain_on_empty_tree_does_not_call_predicate() {
+        let mut balances = AccountBalances::new();
+
+        balances.retain(|_account_id, _balance| panic!("empty tree has no entries"));
+
+        assert!(balances.root.is_empty_leaf());
+        balances.assert_valid();
+    }
+
+    #[test]
+    fn retain_keeps_matching_entries_and_value_updates() {
+        let mut balances = branched_balances();
+
+        balances.retain(|account_id, balance| {
+            *balance += 500;
+            account_id.ends_with("001")
+        });
+
+        assert_eq!(
+            balances
+                .iter()
+                .map(|(account_id, balance)| (account_id.as_str(), *balance))
+                .collect::<Vec<_>>(),
+            [
+                ("account-2026-1001", 13_000),
+                ("account-2026-2001", 25_500),
+                ("account-2026-3001", 38_000),
+            ]
+        );
+        balances.assert_valid();
+    }
+
+    #[test]
+    fn retain_removing_every_entry_restores_empty_root() {
+        let mut balances = account_balances(1_001..=1_032);
+
+        balances.retain(|_account_id, _balance| false);
+
+        assert!(balances.is_empty());
+        assert!(balances.root.is_empty_leaf());
         balances.assert_valid();
     }
 

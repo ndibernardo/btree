@@ -385,6 +385,10 @@ mod tests {
         Lookup {
             account_id: GeneratedAccountId,
         },
+        AdjustBalance {
+            account_id: GeneratedAccountId,
+            new_balance: GeneratedBalanceCents,
+        },
         Clear,
     }
 
@@ -410,6 +414,12 @@ mod tests {
             2 => generated_account_id().prop_map(|account_id| MapOperation::Lookup {
                 account_id,
             }),
+            2 => (generated_account_id(), generated_balance()).prop_map(
+                |(account_id, new_balance)| MapOperation::AdjustBalance {
+                    account_id,
+                    new_balance,
+                },
+            ),
             1 => Just(MapOperation::Clear),
         ]
     }
@@ -470,6 +480,27 @@ mod tests {
                         expected.contains_key(&account_id)
                     );
                 }
+                MapOperation::AdjustBalance {
+                    account_id,
+                    new_balance,
+                } => match (
+                    actual.get_mut(&account_id),
+                    expected.get_mut(&account_id),
+                ) {
+                    (Some(actual_balance), Some(expected_balance)) => {
+                        prop_assert_eq!(*actual_balance, *expected_balance);
+                        *actual_balance = new_balance;
+                        *expected_balance = new_balance;
+                    }
+                    (None, None) => {}
+                    (actual_balance, expected_balance) => {
+                        return Err(TestCaseError::fail(format!(
+                            "mutable lookup presence differs: {} versus {}",
+                            actual_balance.is_some(),
+                            expected_balance.is_some()
+                        )));
+                    }
+                },
                 MapOperation::Clear => {
                     actual.clear();
                     expected.clear();
@@ -485,6 +516,24 @@ mod tests {
 
             Ok(())
         })
+    }
+
+    #[test]
+    fn mutable_lookups_match_standard_map_for_present_and_missing_accounts() -> TestCaseResult {
+        assert_operations_match_standard::<3>(&[
+            MapOperation::Insert {
+                account_id: GeneratedAccountId::new(1_001),
+                balance: GeneratedBalanceCents::new(12_500),
+            },
+            MapOperation::AdjustBalance {
+                account_id: GeneratedAccountId::new(1_001),
+                new_balance: GeneratedBalanceCents::new(15_000),
+            },
+            MapOperation::AdjustBalance {
+                account_id: GeneratedAccountId::new(2_001),
+                new_balance: GeneratedBalanceCents::new(25_000),
+            },
+        ])
     }
 
     proptest! {

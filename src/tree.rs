@@ -276,6 +276,14 @@ impl<K, V, const CAPACITY: usize> Default for BTree<K, V, CAPACITY> {
     }
 }
 
+impl<K: Ord + std::fmt::Debug, V: std::fmt::Debug, const CAPACITY: usize> std::fmt::Debug
+    for BTree<K, V, CAPACITY>
+{
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_map().entries(self.iter()).finish()
+    }
+}
+
 impl<'tree, K: Ord, V, const CAPACITY: usize> IntoIterator for &'tree BTree<K, V, CAPACITY> {
     type Item = (&'tree K, &'tree V);
     type IntoIter = Iter<'tree, K, V, CAPACITY>;
@@ -785,6 +793,18 @@ mod tests {
                 (String::from("account-2026-3001"), 30_010),
                 (String::from("account-2026-4001"), 40_010),
             ]
+        );
+    }
+
+    #[test]
+    fn debug_formats_entries_as_an_ordered_map() {
+        let balances = account_balances([3_001, 1_001, 2_001]);
+
+        let formatted = format!("{balances:?}");
+
+        assert_eq!(
+            formatted,
+            "{\"account-2026-1001\": 10010, \"account-2026-2001\": 20010, \"account-2026-3001\": 30010}"
         );
     }
 

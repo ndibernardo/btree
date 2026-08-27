@@ -66,9 +66,10 @@ reports the removed value or `RemoveOutcome::Missing`.
 
 ## Building from iterators
 
-`BTree` implements `FromIterator`, `Extend`, and consuming `IntoIterator`, while
-`&BTree` implements `IntoIterator` over borrowed entries. Entries are processed in
-iterator order, so the last value for a duplicate key wins:
+`BTree` implements `FromIterator`, `Extend`, consuming `IntoIterator`, and
+ordered map-style `Debug`, while `&BTree` implements `IntoIterator` over borrowed
+entries. Entries are processed in iterator order, so the last value for a
+duplicate key wins:
 
 ```rust
 use btree::BTree;

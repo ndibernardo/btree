@@ -1947,6 +1947,35 @@ mod tests {
     }
 
     #[test]
+    fn underfull_parent_propagates_underflow() {
+        let mut parent: AccountNode = Node::from_sorted_branch(
+            Node::from_leaf(account_leaf([1_001, 1_501])),
+            (
+                AccountId::new(2_001),
+                Node::from_leaf(account_leaf([2_001, 2_501])),
+            ),
+            [],
+        );
+
+        let result = parent.remove(&AccountId::new(2_001));
+
+        assert_eq!(
+            result,
+            RemoveResult::Removed {
+                value: BalanceCents::new(20_010),
+                occupancy: OccupancyChange::Underflow {
+                    minimum: MinimumChange::Unchanged,
+                },
+            }
+        );
+        let expected_underfull_parent = Node::Branch(BranchNode {
+            leftmost: Box::new(Node::from_leaf(account_leaf([1_001, 1_501, 2_501]))),
+            rightward: Vec::new(),
+        });
+        assert_eq!(parent, expected_underfull_parent);
+    }
+
+    #[test]
     fn rebalance_leaf_merges_right_sibling() {
         let mut root: AccountNode = Node::from_sorted_branch(
             Node::from_leaf(account_leaf([1_001, 1_501])),

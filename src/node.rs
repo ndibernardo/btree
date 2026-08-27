@@ -962,7 +962,10 @@ impl ValidationStats {
     }
 
     fn merge_sibling(self, sibling: Self) -> Self {
-        assert_eq!(self.height, sibling.height);
+        assert_eq!(
+            self.height, sibling.height,
+            "all leaves have the same depth"
+        );
         Self {
             height: self.height,
             entry_count: self.entry_count + sibling.entry_count,
@@ -998,13 +1001,23 @@ impl<K: Ord + std::fmt::Debug, V, const CAPACITY: usize> LeafNode<K, V, CAPACITY
         assert!(
             self.entries
                 .windows(2)
-                .all(|entries| entries[0].key() < entries[1].key())
+                .all(|entries| entries[0].key() <= entries[1].key()),
+            "leaf keys are strictly ordered"
+        );
+        assert!(
+            self.entries
+                .windows(2)
+                .all(|entries| entries[0].key() != entries[1].key()),
+            "leaf keys are unique"
         );
 
         match position {
             ValidationPosition::Root => assert!(self.entries.len() <= CAPACITY),
             ValidationPosition::NonRoot => {
-                assert!(self.entries.len() >= CAPACITY.div_ceil(2));
+                assert!(
+                    self.entries.len() >= CAPACITY.div_ceil(2),
+                    "non-root leaf satisfies minimum occupancy"
+                );
             }
         }
 
@@ -1019,16 +1032,25 @@ impl<K: Ord + std::fmt::Debug, V, const CAPACITY: usize> BranchNode<K, V, CAPACI
         assert!(edge_count <= CAPACITY);
 
         match position {
-            ValidationPosition::Root => assert!(edge_count >= 1),
+            ValidationPosition::Root => {
+                assert!(edge_count >= 1, "branch root has at least two children");
+            }
             ValidationPosition::NonRoot => {
                 let minimum_children = CAPACITY.saturating_add(1).div_ceil(2);
-                assert!(edge_count.saturating_add(1) >= minimum_children);
+                assert!(
+                    edge_count.saturating_add(1) >= minimum_children,
+                    "non-root branch satisfies minimum occupancy"
+                );
             }
         }
 
         assert!(self.edges().map(|edge| &edge.lower_bound).is_sorted());
         self.edges().for_each(|edge| {
-            assert_eq!(Some(&edge.lower_bound), edge.child.minimum_key());
+            assert_eq!(
+                Some(&edge.lower_bound),
+                edge.child.minimum_key(),
+                "branch separator equals child minimum"
+            );
         });
 
         self.edges()
@@ -1178,6 +1200,100 @@ mod tests {
             .iter()
             .map(|entry| (entry.key, entry.value))
             .collect()
+    }
+
+    #[test]
+    fn validate_accepts_well_formed_tree() {
+        let root = Node::from_branch(account_branch());
+
+        assert_eq!(root.assert_valid_root(), 6);
+    }
+
+    #[test]
+    #[should_panic(expected = "leaf keys are strictly ordered")]
+    fn validate_rejects_unsorted_leaf() {
+        let root = Node::from_leaf(account_leaf::<3>([2_001, 1_001]));
+
+        let _entry_count = root.assert_valid_root();
+    }
+
+    #[test]
+    #[should_panic(expected = "leaf keys are unique")]
+    fn validate_rejects_duplicate_leaf_key() {
+        let root = Node::from_leaf(account_leaf::<3>([1_001, 1_001]));
+
+        let _entry_count = root.assert_valid_root();
+    }
+
+    #[test]
+    #[should_panic(expected = "non-root leaf satisfies minimum occupancy")]
+    fn validate_rejects_underfull_non_root_leaf() {
+        let root: AccountNode = Node::from_sorted_branch(
+            Node::from_leaf(account_leaf([1_001])),
+            (
+                AccountId::new(2_001),
+                Node::from_leaf(account_leaf([2_001, 2_501])),
+            ),
+            [],
+        );
+
+        let _entry_count = root.assert_valid_root();
+    }
+
+    #[test]
+    #[should_panic(expected = "non-root branch satisfies minimum occupancy")]
+    fn validate_rejects_underfull_non_root_branch() {
+        let root: AccountNode = Node::from_sorted_branch(
+            underfull_account_branch([1_001, 1_501]),
+            (
+                AccountId::new(2_001),
+                account_branch_node([[2_001, 2_501], [3_001, 3_501]]),
+            ),
+            [],
+        );
+
+        let _entry_count = root.assert_valid_root();
+    }
+
+    #[test]
+    #[should_panic(expected = "branch separator equals child minimum")]
+    fn validate_rejects_stale_separator() {
+        let root: AccountNode = Node::from_sorted_branch(
+            Node::from_leaf(account_leaf([1_001, 1_501])),
+            (
+                AccountId::new(2_501),
+                Node::from_leaf(account_leaf([2_001, 2_501])),
+            ),
+            [],
+        );
+
+        let _entry_count = root.assert_valid_root();
+    }
+
+    #[test]
+    #[should_panic(expected = "all leaves have the same depth")]
+    fn validate_rejects_unbalanced_leaf_depth() {
+        let root: AccountNode = Node::from_sorted_branch(
+            Node::from_leaf(account_leaf([1_001, 1_501])),
+            (
+                AccountId::new(2_001),
+                account_branch_node([[2_001, 2_501], [3_001, 3_501]]),
+            ),
+            [],
+        );
+
+        let _entry_count = root.assert_valid_root();
+    }
+
+    #[test]
+    #[should_panic(expected = "branch root has at least two children")]
+    fn validate_rejects_single_child_root_branch() {
+        let root = Node::Branch(BranchNode {
+            leftmost: Box::new(Node::from_leaf(account_leaf::<3>([1_001, 1_501]))),
+            rightward: Vec::new(),
+        });
+
+        let _entry_count = root.assert_valid_root();
     }
 
     #[test]

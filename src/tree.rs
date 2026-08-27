@@ -335,7 +335,11 @@ impl<K, V, const CAPACITY: usize> BTree<K, V, CAPACITY> {
         K: Ord + std::fmt::Debug,
     {
         let counted_entries = self.root.node.assert_valid_root();
-        assert_eq!(counted_entries, self.length.get());
+        assert_eq!(
+            counted_entries,
+            self.length.get(),
+            "stored length matches leaf total"
+        );
     }
 }
 
@@ -349,6 +353,7 @@ mod tests {
     use proptest::test_runner::TestCaseResult;
 
     use super::BTree;
+    use super::EntryCount;
     use super::InsertOutcome;
     use super::RemoveOutcome;
     use crate::node::Node;
@@ -534,6 +539,15 @@ mod tests {
                 new_balance: GeneratedBalanceCents::new(25_000),
             },
         ])
+    }
+
+    #[test]
+    #[should_panic(expected = "stored length matches leaf total")]
+    fn validate_rejects_incorrect_entry_count() {
+        let mut balances = leaf_balances();
+        balances.length = EntryCount(2);
+
+        balances.assert_valid();
     }
 
     proptest! {
@@ -1134,6 +1148,20 @@ mod tests {
         assert_eq!(outcome, RemoveOutcome::Removed { value: 40_010 });
         assert_eq!(balances.root.height(), 0);
         assert_eq!(balances.len(), 3);
+        balances.assert_valid();
+    }
+
+    #[test]
+    fn occupied_root_branch_preserves_height() {
+        let mut balances = branched_balances();
+        assert_eq!(balances.root.height(), 1);
+
+        let outcome = balances.remove("account-2026-3501");
+
+        assert_eq!(outcome, RemoveOutcome::Removed { value: 43_750 });
+        assert_eq!(balances.root.height(), 1);
+        assert_eq!(balances.len(), 5);
+        assert!(!balances.contains_key("account-2026-3501"));
         balances.assert_valid();
     }
 

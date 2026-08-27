@@ -268,6 +268,30 @@ impl<K: Ord + Clone, V, const CAPACITY: usize> BTree<K, V, CAPACITY> {
             }
         }
     }
+
+    /// Removes and returns the least key-value pair, if present.
+    pub fn pop_first(&mut self) -> Option<(K, V)> {
+        let key = self.first_key_value()?.0.clone();
+
+        match self.remove(&key) {
+            RemoveOutcome::Removed { value } => Some((key, value)),
+            RemoveOutcome::Missing => {
+                unreachable!("the least key remains present until its immediate removal")
+            }
+        }
+    }
+
+    /// Removes and returns the greatest key-value pair, if present.
+    pub fn pop_last(&mut self) -> Option<(K, V)> {
+        let key = self.last_key_value()?.0.clone();
+
+        match self.remove(&key) {
+            RemoveOutcome::Removed { value } => Some((key, value)),
+            RemoveOutcome::Missing => {
+                unreachable!("the greatest key remains present until its immediate removal")
+            }
+        }
+    }
 }
 
 impl<K, V, const CAPACITY: usize> Default for BTree<K, V, CAPACITY> {
@@ -930,6 +954,58 @@ mod tests {
             balances.last_key_value(),
             Some((&String::from("account-2026-3501"), &43_750))
         );
+    }
+
+    #[test]
+    fn pop_first_on_empty_tree_returns_none() {
+        let mut balances = AccountBalances::new();
+
+        let popped = balances.pop_first();
+
+        assert_eq!(popped, None);
+        assert!(balances.root.is_empty_leaf());
+        balances.assert_valid();
+    }
+
+    #[test]
+    fn pop_first_removes_least_entry() {
+        let mut balances = branched_balances();
+
+        let popped = balances.pop_first();
+
+        assert_eq!(popped, Some((String::from("account-2026-1001"), 12_500)));
+        assert_eq!(balances.len(), 5);
+        assert_eq!(
+            balances.first_key_value(),
+            Some((&String::from("account-2026-1501"), &18_750))
+        );
+        balances.assert_valid();
+    }
+
+    #[test]
+    fn pop_last_on_empty_tree_returns_none() {
+        let mut balances = AccountBalances::new();
+
+        let popped = balances.pop_last();
+
+        assert_eq!(popped, None);
+        assert!(balances.root.is_empty_leaf());
+        balances.assert_valid();
+    }
+
+    #[test]
+    fn pop_last_removes_greatest_entry() {
+        let mut balances = branched_balances();
+
+        let popped = balances.pop_last();
+
+        assert_eq!(popped, Some((String::from("account-2026-3501"), 43_750)));
+        assert_eq!(balances.len(), 5);
+        assert_eq!(
+            balances.last_key_value(),
+            Some((&String::from("account-2026-3001"), &37_500))
+        );
+        balances.assert_valid();
     }
 
     #[test]

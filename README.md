@@ -7,7 +7,7 @@ An ordered in-memory map implemented as a B+-tree in Rust.
 This library stores key-value pairs in sorted order. Values live only in leaf
 nodes; branch nodes contain routing separators. The tree supports borrowed-key
 lookup, mutable lookup, insertion, removal, clearing, double-ended iteration, and
-bounded ranges.
+bounded ranges. The least or greatest entry can also be removed directly.
 
 Node capacity is part of the tree's type. It defaults to 32 and can be selected
 with the `CAPACITY` const generic. The crate has no runtime dependencies.
@@ -56,13 +56,18 @@ assert_eq!(
     balances.remove("account-2026-1001"),
     RemoveOutcome::Removed { value: 12_500 },
 );
+assert_eq!(
+    balances.pop_last(),
+    Some((String::from("account-2026-2001"), 25_000)),
+);
 
 balances.clear();
 assert!(balances.is_empty());
 ```
 
 Insertion reports whether it added a key or replaced an existing value. Removal
-reports the removed value or `RemoveOutcome::Missing`.
+reports the removed value or `RemoveOutcome::Missing`. `pop_first` and `pop_last`
+return the removed boundary pair, or `None` when the tree is empty.
 
 ## Building from iterators
 

@@ -136,9 +136,18 @@ impl<K, V, const CAPACITY: usize> Node<K, V, CAPACITY> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
+        self.get_key_value(key).map(|(_stored_key, value)| value)
+    }
+
+    /// Finds a key-value pair by an owned or borrowed key.
+    pub(crate) fn get_key_value<Q>(&self, key: &Q) -> Option<(&K, &V)>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
         match self {
-            Self::Leaf(leaf) => leaf.get(key),
-            Self::Branch(branch) => branch.child_for_key(key).get(key),
+            Self::Leaf(leaf) => leaf.get_key_value(key),
+            Self::Branch(branch) => branch.child_for_key(key).get_key_value(key),
         }
     }
 
@@ -453,13 +462,22 @@ impl<K, V, const CAPACITY: usize> LeafNode<K, V, CAPACITY> {
         }
     }
 
+    #[cfg(test)]
     fn get<Q>(&self, key: &Q) -> Option<&V>
     where
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
+        self.get_key_value(key).map(|(_stored_key, value)| value)
+    }
+
+    fn get_key_value<Q>(&self, key: &Q) -> Option<(&K, &V)>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
         match self.search(key) {
-            SearchSlot::Occupied(index) => Some(self.entries[index.get()].value()),
+            SearchSlot::Occupied(index) => Some(self.entries[index.get()].as_pair()),
             SearchSlot::Vacant(_insertion_index) => None,
         }
     }
@@ -1079,10 +1097,6 @@ impl<K, V> Entry<K, V> {
 
     fn key(&self) -> &K {
         &self.key
-    }
-
-    fn value(&self) -> &V {
-        &self.value
     }
 
     fn value_mut(&mut self) -> &mut V {

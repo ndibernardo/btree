@@ -91,6 +91,14 @@ impl<K, V, const CAPACITY: usize> Root<K, V, CAPACITY> {
         self.node.get(key)
     }
 
+    fn get_key_value<Q>(&self, key: &Q) -> Option<(&K, &V)>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.node.get_key_value(key)
+    }
+
     fn get_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
     where
         K: Borrow<Q>,
@@ -184,6 +192,15 @@ impl<K: Ord, V, const CAPACITY: usize> BTree<K, V, CAPACITY> {
         Q: Ord + ?Sized,
     {
         self.root.get(key)
+    }
+
+    /// Returns references to the stored key and value matching an owned or borrowed key.
+    pub fn get_key_value<Q>(&self, key: &Q) -> Option<(&K, &V)>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+    {
+        self.root.get_key_value(key)
     }
 
     /// Returns a mutable value associated with an owned or borrowed key.
@@ -1028,6 +1045,46 @@ mod tests {
         let balances = leaf_balances();
 
         assert_eq!(balances.get("account-2026-2001"), Some(&25_000));
+    }
+
+    #[test]
+    fn get_key_value_existing_account_returns_stored_pair() {
+        let balances = leaf_balances();
+
+        assert_eq!(
+            balances.get_key_value("account-2026-2001"),
+            Some((&String::from("account-2026-2001"), &25_000))
+        );
+    }
+
+    #[test]
+    fn get_key_value_missing_account_returns_none() {
+        let balances = leaf_balances();
+
+        assert_eq!(balances.get_key_value("account-2026-2501"), None);
+    }
+
+    #[test]
+    fn get_key_value_in_multilevel_tree_follows_branch_path() {
+        let balances = branched_balances();
+
+        assert_eq!(
+            balances.get_key_value("account-2026-3501"),
+            Some((&String::from("account-2026-3501"), &43_750))
+        );
+    }
+
+    #[test]
+    fn get_key_value_with_str_returns_owned_string_key() {
+        let balances = leaf_balances();
+        let borrowed_account_id: &str = "account-2026-3001";
+
+        let stored_pair: Option<(&String, &u64)> = balances.get_key_value(borrowed_account_id);
+
+        assert_eq!(
+            stored_pair.map(|(account_id, balance)| (account_id.as_str(), *balance)),
+            Some(("account-2026-3001", 37_500))
+        );
     }
 
     #[test]

@@ -6,10 +6,11 @@ An ordered in-memory map implemented as a B+-tree in Rust.
 
 This library stores key-value pairs in sorted order. Values live only in leaf
 nodes; branch nodes contain routing separators. The tree supports borrowed-key
-lookup, mutable lookup, insertion, removal, clearing, double-ended iteration, and
-bounded ranges. Keys and values can be projected independently in key order. The
-least or greatest entry can be removed directly, and entries can be retained with
-a predicate that may update their values.
+lookup of values or stored key-value pairs, mutable lookup, insertion, removal,
+clearing, double-ended iteration, and bounded ranges. Keys and values can be
+projected independently in key order. The least or greatest entry can be removed
+directly, and entries can be retained with a predicate that may update their
+values.
 
 Node capacity is part of the tree's type. It defaults to 32 and can be selected
 with the `CAPACITY` const generic. The crate has no runtime dependencies.
@@ -34,6 +35,12 @@ assert_eq!(
 );
 
 assert_eq!(balances.get("account-2026-1001"), Some(&12_500));
+assert_eq!(
+    balances
+        .get_key_value("account-2026-1001")
+        .map(|(account_id, balance)| (account_id.as_str(), *balance)),
+    Some(("account-2026-1001", 12_500)),
+);
 
 let selected = balances
     .range::<str, _>((

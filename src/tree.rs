@@ -1011,6 +1011,32 @@ mod tests {
     }
 
     #[test]
+    fn owned_into_iter_is_double_ended_exact_size_and_fused() {
+        fn assert_fused<I: std::iter::FusedIterator>(_iterator: &I) {}
+
+        let balances = account_balances([3_001, 1_001, 2_001]);
+        let mut entries = balances.into_iter();
+
+        assert_fused(&entries);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(
+            entries.next(),
+            Some((String::from("account-2026-1001"), 10_010))
+        );
+        assert_eq!(
+            entries.next_back(),
+            Some((String::from("account-2026-3001"), 30_010))
+        );
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries.next(),
+            Some((String::from("account-2026-2001"), 20_010))
+        );
+        assert_eq!(entries.next(), None);
+        assert_eq!(entries.next_back(), None);
+    }
+
+    #[test]
     fn debug_formats_entries_as_an_ordered_map() {
         let balances = account_balances([3_001, 1_001, 2_001]);
 

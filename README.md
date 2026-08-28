@@ -82,11 +82,11 @@ removes rejected entries.
 
 ## Building from iterators
 
-`BTree` implements `FromIterator`, `Extend`, consuming `IntoIterator`, and
-ordered map-style `Debug`, while `&BTree` implements `IntoIterator` over borrowed
-entries. The `keys` and `values` methods expose ordered, double-ended projections
-with exact lengths. Entries are processed in iterator order, so the last value
-for a duplicate key wins:
+`BTree` implements `FromIterator`, `Extend`, consuming double-ended
+`IntoIterator` with an exact length, and ordered map-style `Debug`, while `&BTree`
+implements `IntoIterator` over borrowed entries. The `keys` and `values` methods
+expose ordered, double-ended projections with exact lengths. Entries are processed
+in iterator order, so the last value for a duplicate key wins:
 
 ```rust
 use btree::BTree;

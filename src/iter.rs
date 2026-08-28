@@ -12,7 +12,7 @@ use crate::node::SearchSlot;
 
 type Item<'a, K, V> = (&'a K, &'a V);
 
-/// Owning iterator over a consumed tree's entries in key order.
+/// Owning, double-ended, exact-size iterator over a consumed tree's entries.
 pub struct IntoIter<K, V> {
     entries: std::vec::IntoIter<(K, V)>,
 }
@@ -38,6 +38,15 @@ impl<K, V> Iterator for IntoIter<K, V> {
         self.entries.size_hint()
     }
 }
+
+impl<K, V> DoubleEndedIterator for IntoIter<K, V> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.entries.next_back()
+    }
+}
+
+impl<K, V> ExactSizeIterator for IntoIter<K, V> {}
+impl<K, V> FusedIterator for IntoIter<K, V> {}
 
 /// Error returned when range bounds cannot describe an ordered interval.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -175,6 +175,12 @@ Unit tests cover search, routing, splitting, rebalancing, root normalization,
 iteration, and range traversal. Property tests compare generated operation
 sequences with `std::collections::BTreeMap` across odd, even, minimum, and default
 node capacities. Generated range bounds are checked in both traversal directions.
+The extended differential test runs 10,000 generated sequences across capacities
+`3`, `4`, `7`, and `32`:
+
+```bash
+PROPTEST_CASES=10000 cargo test --test differential
+```
 
 The complete local verification commands are:
 

@@ -468,6 +468,11 @@ mod tests {
         Lookup {
             account_id: GeneratedAccountId,
         },
+        Range {
+            start: GeneratedAccountId,
+            end: GeneratedAccountId,
+        },
+        Iterate,
         AdjustBalance {
             account_id: GeneratedAccountId,
             new_balance: GeneratedBalanceCents,
@@ -497,6 +502,13 @@ mod tests {
             2 => generated_account_id().prop_map(|account_id| MapOperation::Lookup {
                 account_id,
             }),
+            2 => (generated_account_id(), generated_account_id()).prop_map(|(start, end)| {
+                MapOperation::Range {
+                    start: start.min(end),
+                    end: start.max(end),
+                }
+            }),
+            1 => Just(MapOperation::Iterate),
             2 => (generated_account_id(), generated_balance()).prop_map(
                 |(account_id, new_balance)| MapOperation::AdjustBalance {
                     account_id,
@@ -563,6 +575,20 @@ mod tests {
                         expected.contains_key(&account_id)
                     );
                 }
+                MapOperation::Range { start, end } => {
+                    let actual_entries = actual
+                        .range(start..=end)
+                        .map_err(|error| {
+                            TestCaseError::fail(format!("valid range returned {error:?}"))
+                        })?
+                        .collect::<Vec<_>>();
+                    let expected_entries = expected.range(start..=end).collect::<Vec<_>>();
+                    prop_assert_eq!(actual_entries, expected_entries);
+                }
+                MapOperation::Iterate => {
+                    prop_assert!(actual.iter().eq(expected.iter()));
+                    prop_assert!(actual.iter().rev().eq(expected.iter().rev()));
+                }
                 MapOperation::AdjustBalance {
                     account_id,
                     new_balance,
@@ -620,6 +646,25 @@ mod tests {
     }
 
     #[test]
+    fn range_and_iteration_operations_match_standard_map() -> TestCaseResult {
+        assert_operations_match_standard::<3>(&[
+            MapOperation::Insert {
+                account_id: GeneratedAccountId::new(1_001),
+                balance: GeneratedBalanceCents::new(12_500),
+            },
+            MapOperation::Insert {
+                account_id: GeneratedAccountId::new(2_001),
+                balance: GeneratedBalanceCents::new(25_000),
+            },
+            MapOperation::Range {
+                start: GeneratedAccountId::new(1_001),
+                end: GeneratedAccountId::new(2_001),
+            },
+            MapOperation::Iterate,
+        ])
+    }
+
+    #[test]
     #[should_panic(expected = "stored length matches leaf total")]
     fn validate_rejects_incorrect_entry_count() {
         let mut balances = leaf_balances();
@@ -646,10 +691,10 @@ mod tests {
         }
 
         #[test]
-        fn generated_operations_match_standard_map_at_capacity_five(
+        fn generated_operations_match_standard_map_at_capacity_seven(
             operations in collection::vec(map_operation(), 0..128),
         ) {
-            assert_operations_match_standard::<5>(&operations)?;
+            assert_operations_match_standard::<7>(&operations)?;
         }
 
         #[test]
